@@ -5,6 +5,7 @@ Vagrant.configure("2") do |config|
     domain.cpu_mode = "host-passthrough"
     domain.memory = 8192
     domain.cpus = 4
+    @ fummy change
     ## 32GB is about the minimum for e2e tests
     # domain.memory = 32768
     ## 4 to 8 CPUs seems to be about the minimum for e2e tests
