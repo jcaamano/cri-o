@@ -20,12 +20,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
-	utiliptables "github.com/cri-o/cri-o/internal/iptables"
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilnet "k8s.io/utils/net"
+
+	utiliptables "github.com/cri-o/cri-o/internal/iptables"
 )
 
 type fakeChain struct {
@@ -130,7 +131,7 @@ func (f *fakeIPTables) ChainExists(tableName utiliptables.Table, chainName utili
 	return true, nil
 }
 
-// Returns index of rule in array; < 0 if rule is not found
+// Returns index of rule in array; < 0 if rule is not found.
 func findRule(chain *fakeChain, rule string) int {
 	for i, candidate := range chain.rules {
 		if rule == candidate {
@@ -191,8 +192,13 @@ func normalizeRule(rule string) (string, error) {
 		arg := remaining[:end]
 
 		// Normalize un-prefixed IP addresses like iptables does
-		if net.ParseIP(arg) != nil {
+		switch utilnet.IPFamilyOfString(arg) {
+		case utilnet.IPv4:
 			arg += "/32"
+		case utilnet.IPv6:
+			arg += "/128"
+		default:
+			// Not an IP, presumably already a CIDR, so don't change
 		}
 
 		if normalized != "" {
@@ -240,7 +246,7 @@ func (f *fakeIPTables) Protocol() utiliptables.Protocol {
 	return f.protocol
 }
 
-// nolint:interfacer
+//nolint:interfacer
 func saveChain(chain *fakeChain, data *bytes.Buffer) {
 	for _, rule := range chain.rules {
 		fmt.Fprintf(data, "-A %s %s\n", chain.name, rule)
@@ -286,7 +292,7 @@ func (f *fakeIPTables) restore(restoreTableName utiliptables.Table, data []byte,
 			if restoreTableName != "" && restoreTableName != tableName {
 				continue
 			}
-			// nolint:gocritic // using a switch statement is not much different
+			//nolint:gocritic // using a switch statement is not much different
 			if strings.HasPrefix(line, ":") {
 				chainName := utiliptables.Chain(strings.Split(line[1:], " ")[0])
 				if flush == utiliptables.FlushTables {

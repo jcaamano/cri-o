@@ -9,19 +9,20 @@ import (
 	istorage "github.com/containers/image/v5/storage"
 	"github.com/containers/image/v5/types"
 	cs "github.com/containers/storage"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	digest "github.com/opencontainers/go-digest"
+	"go.uber.org/mock/gomock"
+
 	"github.com/cri-o/cri-o/internal/mockutils"
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/internal/storage/references"
 	"github.com/cri-o/cri-o/pkg/config"
 	containerstoragemock "github.com/cri-o/cri-o/test/mocks/containerstorage"
 	criostoragemock "github.com/cri-o/cri-o/test/mocks/criostorage"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	digest "github.com/opencontainers/go-digest"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Image", func() {
 	// Test constants
 	const (
@@ -415,6 +416,7 @@ var _ = t.Describe("Image", func() {
 				// makeRepoDigests
 				storeMock.EXPECT().ImageBigDataDigest(testSHA256, gomock.Any()).
 					Return(digest.Digest("a:"+testSHA256), nil),
+				storeMock.EXPECT().Layer(gomock.Any()).Return(&cs.Layer{}, nil),
 			)
 			ref, err := references.ParseRegistryImageReferenceFromOutOfProcessData(testImageName)
 			Expect(err).ToNot(HaveOccurred())
@@ -499,6 +501,7 @@ var _ = t.Describe("Image", func() {
 					// makeRepoDigests:
 					storeMock.EXPECT().ImageBigDataDigest(testSHA256, gomock.Any()).
 						Return(digest.Digest(""), nil),
+					storeMock.EXPECT().Layer(gomock.Any()).Return(&cs.Layer{}, nil),
 				)
 			}
 			mockutils.InOrder(
@@ -580,7 +583,7 @@ var _ = t.Describe("Image", func() {
 
 			// Then
 			Expect(err).To(HaveOccurred())
-			Expect(res).To(BeNil())
+			Expect(res).To(Equal(storage.RegistryImageReference{}))
 		})
 
 		It("should fail on copy image", func() {
@@ -595,7 +598,7 @@ var _ = t.Describe("Image", func() {
 
 			// Then
 			Expect(err).To(HaveOccurred())
-			Expect(res).To(BeNil())
+			Expect(res).To(Equal(storage.RegistryImageReference{}))
 		})
 
 		It("should fail on canonical copy image", func() {
@@ -610,7 +613,7 @@ var _ = t.Describe("Image", func() {
 
 			// Then
 			Expect(err).To(HaveOccurred())
-			Expect(res).To(BeNil())
+			Expect(res).To(Equal(storage.RegistryImageReference{}))
 		})
 
 		It("should fail on cancelled context", func() {
@@ -628,18 +631,36 @@ var _ = t.Describe("Image", func() {
 			// Then
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("context canceled"))
-			Expect(res).To(BeNil())
+			Expect(res).To(Equal(storage.RegistryImageReference{}))
+		})
+
+		It("should fail on timed out context", func() {
+			// Given
+			imageRef, err := references.ParseRegistryImageReferenceFromOutOfProcessData("localhost/busybox:latest")
+			Expect(err).ToNot(HaveOccurred())
+
+			// When
+			ctx, cancel := context.WithTimeout(context.Background(), 0)
+			defer cancel()
+			res, err := sut.PullImage(ctx, imageRef, &storage.ImageCopyOptions{
+				SourceCtx: &types.SystemContext{SignaturePolicyPath: "../../test/policy.json"},
+			})
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("context deadline exceeded"))
+			Expect(res).To(Equal(storage.RegistryImageReference{}))
 		})
 	})
 
 	t.Describe("CompileRegexpsForPinnedImages", func() {
 		It("should return regexps for exact patterns", func() {
-			patterns := []string{"quay.io/crio/pause:latest", "docker.io/crio/sandbox:latest", "registry.k8s.io/pause:3.9"}
+			patterns := []string{"quay.io/crio/pause:latest", "docker.io/crio/sandbox:latest", "registry.k8s.io/pause:3.10"}
 			regexps := storage.CompileRegexpsForPinnedImages(patterns)
 			Expect(regexps).To(HaveLen(len(patterns)))
 			Expect(regexps[0].MatchString("quay.io/crio/pause:latest")).To(BeTrue())
 			Expect(regexps[1].MatchString("docker.io/crio/sandbox:latest")).To(BeTrue())
-			Expect(regexps[2].MatchString("registry.k8s.io/pause:3.9")).To(BeTrue())
+			Expect(regexps[2].MatchString("registry.k8s.io/pause:3.10")).To(BeTrue())
 		})
 
 		It("should return regexps for keyword patterns", func() {

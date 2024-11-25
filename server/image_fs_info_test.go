@@ -4,12 +4,12 @@ import (
 	"context"
 	"os"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ImageFsInfo", func() {
 	// Prepare the sut
 	BeforeEach(func() {

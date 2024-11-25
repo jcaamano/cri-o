@@ -1,15 +1,18 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
+
+	"github.com/containers/storage/pkg/truncindex"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/runtimehandlerhooks"
-	"golang.org/x/net/context"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 // StopContainer stops a running container with a grace period (i.e., timeout).
@@ -19,6 +22,12 @@ func (s *Server) StopContainer(ctx context.Context, req *types.StopContainerRequ
 	log.Infof(ctx, "Stopping container: %s (timeout: %ds)", req.ContainerId, req.Timeout)
 	c, err := s.GetContainerFromShortID(ctx, req.ContainerId)
 	if err != nil {
+		// The StopContainer RPC is idempotent, and must not return an error if
+		// the container has already been stopped. Ref:
+		// https://github.com/kubernetes/cri-api/blob/c20fa40/pkg/apis/runtime/v1/api.proto#L67-L68
+		if errors.Is(err, truncindex.ErrNotExist) {
+			return &types.StopContainerResponse{}, nil
+		}
 		return nil, status.Errorf(codes.NotFound, "could not find container %q: %v", req.ContainerId, err)
 	}
 
@@ -45,15 +54,6 @@ func (s *Server) stopContainer(ctx context.Context, ctr *oci.Container, timeout 
 	if hooks != nil {
 		if err := hooks.PreStop(ctx, ctr, sb); err != nil {
 			return fmt.Errorf("failed to run pre-stop hook for container %q: %w", ctr.ID(), err)
-		}
-	}
-
-	if ctr.StateNoLock().Status == oci.ContainerStatePaused {
-		if err := s.Runtime().UnpauseContainer(ctx, ctr); err != nil {
-			return fmt.Errorf("failed to stop container %s: %w", ctr.Name(), err)
-		}
-		if err := s.Runtime().UpdateContainerStatus(ctx, ctr); err != nil {
-			return fmt.Errorf("failed to update container status %s: %w", ctr.Name(), err)
 		}
 	}
 

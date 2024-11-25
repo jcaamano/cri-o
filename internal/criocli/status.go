@@ -2,11 +2,13 @@ package criocli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
-	"github.com/cri-o/cri-o/internal/client"
-
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+
+	"github.com/cri-o/cri-o/internal/client"
 )
 
 const (
@@ -48,7 +50,29 @@ var StatusCommand = &cli.Command{
 		Aliases: []string{"i"},
 		Name:    "info",
 		Usage:   "Retrieve generic information about CRI-O, such as the cgroup and storage driver.",
+	}, {
+		Action:  goroutines,
+		Aliases: []string{"g"},
+		Name:    "goroutines",
+		Usage:   "Display the goroutine stack.",
+	}, {
+		Action:  heap,
+		Aliases: []string{"hp"},
+		Name:    "heap",
+		Usage:   "Write the heap dump to a temp file and print its location on disk.",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:      "file",
+				Aliases:   []string{"f"},
+				Usage:     "Output file of the heap dump.",
+				TakesFile: true,
+			},
+		},
 	}},
+}
+
+func crioClient(c *cli.Context) (client.CrioClient, error) {
+	return client.New(c.String(socketArg))
 }
 
 func configSubCommand(c *cli.Context) error {
@@ -57,7 +81,7 @@ func configSubCommand(c *cli.Context) error {
 		return err
 	}
 
-	info, err := crioClient.ConfigInfo()
+	info, err := crioClient.ConfigInfo(c.Context)
 	if err != nil {
 		return err
 	}
@@ -77,7 +101,7 @@ func containers(c *cli.Context) error {
 		return fmt.Errorf("the argument --%s cannot be empty", idArg)
 	}
 
-	info, err := crioClient.ContainerInfo(c.String(idArg))
+	info, err := crioClient.ContainerInfo(c.Context, c.String(idArg))
 	if err != nil {
 		return err
 	}
@@ -113,7 +137,7 @@ func info(c *cli.Context) error {
 		return err
 	}
 
-	info, err := crioClient.DaemonInfo()
+	info, err := crioClient.DaemonInfo(c.Context)
 	if err != nil {
 		return err
 	}
@@ -135,6 +159,56 @@ func info(c *cli.Context) error {
 	return nil
 }
 
-func crioClient(c *cli.Context) (client.CrioClient, error) {
-	return client.New(c.String(socketArg))
+func goroutines(c *cli.Context) error {
+	crioClient, err := crioClient(c)
+	if err != nil {
+		return err
+	}
+
+	goroutineStack, err := crioClient.GoRoutinesInfo(c.Context)
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(goroutineStack)
+
+	return nil
+}
+
+func heap(c *cli.Context) error {
+	crioClient, err := crioClient(c)
+	if err != nil {
+		return err
+	}
+
+	data, err := crioClient.HeapInfo(c.Context)
+	if err != nil {
+		return err
+	}
+
+	outputPath := c.String("file")
+	switch outputPath {
+	case "-":
+		if _, err := os.Stdout.Write(data); err != nil {
+			return fmt.Errorf("write heap dump to stdout: %w", err)
+		}
+
+	case "":
+		outputPath = fmt.Sprintf("crio-heap-%s.out", Timestamp())
+		fallthrough
+
+	default:
+		file, err := os.Create(outputPath)
+		if err != nil {
+			return fmt.Errorf("create output file %s: %w", outputPath, err)
+		}
+
+		if _, err := file.Write(data); err != nil {
+			return fmt.Errorf("write heap dump: %w", err)
+		}
+
+		logrus.Infof("Wrote heap dump to: %s", outputPath)
+	}
+
+	return nil
 }

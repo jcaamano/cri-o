@@ -1,21 +1,26 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/pprof"
+	"os"
+	"runtime/debug"
 
 	"github.com/containers/storage/pkg/idtools"
+	"github.com/go-chi/chi/v5"
+	json "github.com/json-iterator/go"
+	"github.com/sirupsen/logrus"
+
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/pkg/types"
-	"github.com/go-chi/chi/v5"
-	json "github.com/json-iterator/go"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
+	"github.com/cri-o/cri-o/utils"
 )
 
 func (s *Server) getIDMappingsInfo() types.IDMappings {
@@ -97,8 +102,8 @@ func (s *Server) getContainerInfo(ctx context.Context, id string, getContainerFu
 		}
 	}
 	image := ""
-	if imageName := ctr.ImageName(); imageName != nil {
-		image = imageName.StringForOutOfProcessConsumptionOnly()
+	if someNameOfTheImage := ctr.SomeNameOfTheImage(); someNameOfTheImage != nil {
+		image = someNameOfTheImage.StringForOutOfProcessConsumptionOnly()
 	}
 	imageRef := ctr.CRIContainer().ImageRef
 	return types.ContainerInfo{
@@ -123,9 +128,11 @@ const (
 	InspectInfoEndpoint       = "/info"
 	InspectPauseEndpoint      = "/pause"
 	InspectUnpauseEndpoint    = "/unpause"
+	InspectGoRoutinesEndpoint = "/debug/goroutines"
+	InspectHeapEndpoint       = "/debug/heap"
 )
 
-// GetExtendInterfaceMux returns the mux used to serve extend interface requests
+// GetExtendInterfaceMux returns the mux used to serve extend interface requests.
 func (s *Server) GetExtendInterfaceMux(enableProfile bool) *chi.Mux {
 	mux := chi.NewMux()
 
@@ -240,6 +247,36 @@ func (s *Server) GetExtendInterfaceMux(enableProfile bool) *chi.Mux {
 		w.Header().Set("Content-Type", "text/html")
 		if _, err := w.Write([]byte("200 OK")); err != nil {
 			logrus.Errorf("Unable to write response JSON: %v", err)
+		}
+	}))
+
+	mux.Get(InspectGoRoutinesEndpoint, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		if err := utils.WriteGoroutineStacksTo(w); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
+
+	mux.Get(InspectHeapEndpoint, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+
+		f, err := os.CreateTemp("", "cri-o-heap-*.out")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(f.Name())
+		debug.WriteHeapDump(f.Fd())
+
+		if _, err := f.Seek(0, 0); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 	}))
 

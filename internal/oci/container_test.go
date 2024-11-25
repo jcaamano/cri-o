@@ -8,12 +8,14 @@ import (
 	"time"
 
 	"github.com/containers/storage/pkg/idtools"
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/containers/storage/pkg/unshare"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/cri-o/cri-o/internal/storage"
 )
 
 const (
@@ -21,7 +23,7 @@ const (
 	alwaysRunningPid = 1
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Container", func() {
 	// The system under test
 	var sut *oci.Container
@@ -43,7 +45,7 @@ var _ = t.Describe("Container", func() {
 		Expect(len(sut.Annotations())).To(BeEquivalentTo(1))
 		Expect(len(sut.CrioAnnotations())).To(BeEquivalentTo(1))
 		Expect(sut.UserRequestedImage()).To(Equal("image"))
-		Expect(sut.ImageName().StringForOutOfProcessConsumptionOnly()).To(Equal("docker.io/library/image-name:latest"))
+		Expect(sut.SomeNameOfTheImage().StringForOutOfProcessConsumptionOnly()).To(Equal("docker.io/library/image-name:latest"))
 		Expect(sut.ImageID().IDStringForOutOfProcessConsumptionOnly()).To(Equal("2a03a6059f21e150ae84b0973863609494aad70f0a80eaeb64bddd8d92465812"))
 		Expect(sut.Sandbox()).To(Equal("sandbox"))
 		Expect(sut.Dir()).To(Equal("dir"))
@@ -426,42 +428,6 @@ var _ = t.Describe("Container", func() {
 			Expect(err).To(HaveOccurred())
 		})
 	})
-	t.Describe("ShouldBeStopped", func() {
-		It("should fail to stop if already stopped", func() {
-			// Given
-			state := &oci.ContainerState{}
-			state.Status = oci.ContainerStateStopped
-			sut.SetState(state)
-			// When
-			err := sut.ShouldBeStopped()
-
-			// Then
-			Expect(err).To(Equal(oci.ErrContainerStopped))
-		})
-		It("should fail to stop if paused", func() {
-			// Given
-			state := &oci.ContainerState{}
-			state.Status = oci.ContainerStatePaused
-			sut.SetState(state)
-			// When
-			err := sut.ShouldBeStopped()
-
-			// Then
-			Expect(err).NotTo(Equal(oci.ErrContainerStopped))
-			Expect(err).To(HaveOccurred())
-		})
-		It("should succeed to stop if started", func() {
-			// Given
-			state := &oci.ContainerState{}
-			state.Status = oci.ContainerStateRunning
-			sut.SetState(state)
-			// When
-			err := sut.ShouldBeStopped()
-
-			// Then
-			Expect(err).ToNot(HaveOccurred())
-		})
-	})
 	t.Describe("Living", func() {
 		It("should be false if pid uninitialized", func() {
 			// Given
@@ -475,6 +441,10 @@ var _ = t.Describe("Container", func() {
 			Expect(err).To(HaveOccurred())
 		})
 		It("should succeed if pid is running", func() {
+			if unshare.IsRootless() {
+				Skip("need to run as root")
+			}
+
 			// Given
 			state := &oci.ContainerState{}
 			state.Pid = alwaysRunningPid
@@ -514,6 +484,10 @@ var _ = t.Describe("Container", func() {
 			Expect(processState).To(BeEmpty())
 		})
 		It("should succeed if pid is running", func() {
+			if unshare.IsRootless() {
+				Skip("need to run as root")
+			}
+
 			// Given
 			state := &oci.ContainerState{}
 			state.Pid = alwaysRunningPid
@@ -611,6 +585,10 @@ var _ = t.Describe("Container", func() {
 			Expect(err).To(HaveOccurred())
 		})
 		It("should succeed", func() {
+			if unshare.IsRootless() {
+				Skip("need to run as root")
+			}
+
 			// Given
 			state := &oci.ContainerState{}
 			state.Pid = alwaysRunningPid

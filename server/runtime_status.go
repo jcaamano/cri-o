@@ -1,17 +1,17 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
-	"golang.org/x/net/context"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 // networkNotReadyReason is the reason reported when network is not ready.
 const networkNotReadyReason = "NetworkPluginNotReady"
 
-// Status returns the status of the runtime
+// Status returns the status of the runtime.
 func (s *Server) Status(ctx context.Context, req *types.StatusRequest) (*types.StatusResponse, error) {
 	runtimeCondition := &types.RuntimeCondition{
 		Type:   types.RuntimeReady,
@@ -34,6 +34,9 @@ func (s *Server) Status(ctx context.Context, req *types.StatusRequest) (*types.S
 				runtimeCondition,
 				networkCondition,
 			},
+		},
+		Features: &types.RuntimeFeatures{
+			SupplementalGroupsPolicy: true,
 		},
 	}
 
@@ -71,7 +74,7 @@ func (s *Server) Status(ctx context.Context, req *types.StatusRequest) (*types.S
 }
 
 func (s *Server) createRuntimeInfo() (map[string]string, error) {
-	config := map[string]interface{}{
+	config := map[string]any{
 		"sandboxImage": s.config.ImageConfig.PauseImage,
 	}
 	bytes, err := json.Marshal(config)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,10 +15,19 @@ import (
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/unshare"
+	json "github.com/json-iterator/go"
+	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-tools/generate"
+	"github.com/opencontainers/selinux/go-selinux/label"
+	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/api/resource"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	kubeletTypes "k8s.io/kubelet/pkg/types"
+
 	"github.com/cri-o/cri-o/internal/config/nsmgr"
 	ctrfactory "github.com/cri-o/cri-o/internal/factory/container"
 	sboxfactory "github.com/cri-o/cri-o/internal/factory/sandbox"
-	"github.com/cri-o/cri-o/internal/lib"
+	"github.com/cri-o/cri-o/internal/lib/constants"
 	libsandbox "github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/linklogs"
 	"github.com/cri-o/cri-o/internal/log"
@@ -27,18 +37,9 @@ import (
 	"github.com/cri-o/cri-o/pkg/annotations"
 	libconfig "github.com/cri-o/cri-o/pkg/config"
 	"github.com/cri-o/cri-o/utils"
-	json "github.com/json-iterator/go"
-	spec "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/opencontainers/runtime-tools/generate"
-	"github.com/opencontainers/selinux/go-selinux/label"
-	"golang.org/x/net/context"
-	"golang.org/x/sys/unix"
-	"k8s.io/apimachinery/pkg/api/resource"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	kubeletTypes "k8s.io/kubelet/pkg/types"
 )
 
-// DefaultUserNSSize is the default size for the user namespace created
+// DefaultUserNSSize is the default size for the user namespace created.
 const DefaultUserNSSize = 65536
 
 // addToMappingsIfMissing ensures the specified id is mapped from the host.
@@ -357,7 +358,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	// These fields are populated by the Kubelet, but not crictl. Populate if needed.
 	sbox.Config().Labels = populateSandboxLabels(sbox.Config().Labels, kubeName, kubePodUID, namespace)
 	// we need to fill in the container name, as it is not present in the request. Luckily, it is a constant.
-	log.Infof(ctx, "Running pod sandbox: %s%s", translateLabelsToDescription(sbox.Config().Labels), oci.InfraContainerName)
+	log.Infof(ctx, "Running pod sandbox: %s%s", oci.LabelsToDescription(sbox.Config().GetLabels()), oci.InfraContainerName)
 
 	if err := sbox.SetNameAndID(); err != nil {
 		return nil, fmt.Errorf("setting pod sandbox name and id: %w", err)
@@ -645,8 +646,8 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	g.AddAnnotation(annotations.Namespace, namespace)
 	g.AddAnnotation(annotations.ContainerType, annotations.ContainerTypeSandbox)
 	g.AddAnnotation(annotations.SandboxID, sbox.ID())
-	g.AddAnnotation(annotations.Image, pauseImage.StringForOutOfProcessConsumptionOnly())
-	g.AddAnnotation(annotations.ImageName, pauseImage.StringForOutOfProcessConsumptionOnly())
+	g.AddAnnotation(annotations.UserRequestedImage, pauseImage.StringForOutOfProcessConsumptionOnly())
+	g.AddAnnotation(annotations.SomeNameOfTheImage, pauseImage.StringForOutOfProcessConsumptionOnly())
 	g.AddAnnotation(annotations.ContainerName, containerName)
 	g.AddAnnotation(annotations.ContainerID, sbox.ID())
 	g.AddAnnotation(annotations.ShmPath, shmPath)
@@ -657,7 +658,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	g.AddAnnotation(annotations.NamespaceOptions, string(nsOptsJSON))
 	g.AddAnnotation(annotations.KubeName, kubeName)
 	g.AddAnnotation(annotations.HostNetwork, strconv.FormatBool(hostNetwork))
-	g.AddAnnotation(annotations.ContainerManager, lib.ContainerManagerCRIO)
+	g.AddAnnotation(annotations.ContainerManager, constants.ContainerManagerCRIO)
 	if podContainer.Config.Config.StopSignal != "" {
 		// this key is defined in image-spec conversion document at https://github.com/opencontainers/image-spec/pull/492/files#diff-8aafbe2c3690162540381b8cdb157112R57
 		g.AddAnnotation("org.opencontainers.image.stopSignal", podContainer.Config.Config.StopSignal)
@@ -786,7 +787,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 		}
 
 		// Now that we've succeeded in stopping the network, cleanup namespaces
-		log.Infof(ctx, nsCleanupDescription)
+		log.Infof(ctx, "%s", nsCleanupDescription)
 		return nsCleanupFunc()
 	})
 	if result != nil {
@@ -996,7 +997,7 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	}
 	resourceCleaner.Add(ctx, "runSandbox: stopping container "+container.ID(), func() error {
 		// Clean-up steps from RemovePodSandbox
-		if err := s.stopContainer(ctx, container, int64(10)); err != nil {
+		if err := s.stopContainer(ctx, container, stopTimeoutFromContext(ctx)); err != nil {
 			return errors.New("failed to stop container for removal")
 		}
 

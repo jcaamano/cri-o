@@ -1,17 +1,18 @@
 package server
 
 import (
+	"context"
 	"fmt"
 
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
 	"github.com/cri-o/cri-o/internal/lib"
 	"github.com/cri-o/cri-o/internal/log"
 	oci "github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/runtimehandlerhooks"
-	"golang.org/x/net/context"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 // StartContainer starts the container.
@@ -86,6 +87,9 @@ func (s *Server) StartContainer(ctx context.Context, req *types.StartContainerRe
 			if err := s.nri.stopContainer(ctx, sandbox, c); err != nil {
 				log.Warnf(ctx, "NRI stop failed for container %q: %v", c.ID(), err)
 			}
+			if err := s.removeContainerInPod(ctx, sandbox, c); err != nil {
+				log.Warnf(ctx, "Failed to delete container in runtime %s: %v", c.ID(), err)
+			}
 		}
 		if err := s.ContainerStateToDisk(ctx, c); err != nil {
 			log.Warnf(ctx, "Unable to write containers %s state to disk: %v", c.ID(), err)
@@ -107,7 +111,7 @@ func (s *Server) StartContainer(ctx context.Context, req *types.StartContainerRe
 		log.Warnf(ctx, "NRI post-start failed for container %q: %v", c.ID(), err)
 	}
 
-	log.WithFields(ctx, map[string]interface{}{
+	log.WithFields(ctx, map[string]any{
 		"description": c.Description(),
 		"containerID": c.ID(),
 		"sandboxID":   sandbox.ID(),

@@ -25,8 +25,8 @@ CRIO_BINARY_PATH=${CRIO_BINARY_PATH:-${CRIO_ROOT}/bin/$CRIO_BINARY}
 PINNS_BINARY_PATH=${PINNS_BINARY_PATH:-${CRIO_ROOT}/bin/pinns}
 
 # Path of the crictl binary.
-CRICTL_PATH=$(command -v crictl || true)
-CRICTL_BINARY=${CRICTL_PATH:-/usr/bin/crictl}
+CRICTL_BINARY=${CRICTL_BINARY:-$(command -v crictl)}
+CRICTL_TIMEOUT=${CRICTL_TIMEOUT:-30s}
 # Path of the conmon binary set as a variable to allow overwriting.
 CONMON_BINARY=${CONMON_BINARY:-$(command -v conmon)}
 # Cgroup for the conmon process
@@ -43,7 +43,7 @@ else
     CONTAINER_CNI_PLUGIN_DIR=${CONTAINER_CNI_PLUGIN_DIR:-/opt/cni/bin}
 fi
 # Runtime
-CONTAINER_DEFAULT_RUNTIME=${CONTAINER_DEFAULT_RUNTIME:-runc}
+CONTAINER_DEFAULT_RUNTIME=${CONTAINER_DEFAULT_RUNTIME:-crun}
 RUNTIME_BINARY_PATH=$(command -v "$CONTAINER_DEFAULT_RUNTIME")
 RUNTIME_TYPE=${RUNTIME_TYPE:-oci}
 PRIVILEGED_WITHOUT_HOST_DEVICES=${PRIVILEGED_WITHOUT_HOST_DEVICES:-}
@@ -108,7 +108,7 @@ ARCH=$(uname -m)
 ARCH_X86_64=x86_64
 
 IMAGES=(
-    registry.k8s.io/pause:3.9
+    registry.k8s.io/pause:3.10
     quay.io/crio/fedora-crio-ci:latest
     quay.io/crio/hello-wasm:latest
 )

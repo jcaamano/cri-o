@@ -10,6 +10,13 @@ import (
 	"time"
 
 	cstorage "github.com/containers/storage"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/sirupsen/logrus"
+	"go.uber.org/mock/gomock"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/kubelet/pkg/cri/streaming"
+
 	"github.com/cri-o/cri-o/internal/hostport"
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/oci"
@@ -22,15 +29,9 @@ import (
 	libmock "github.com/cri-o/cri-o/test/mocks/lib"
 	ocimock "github.com/cri-o/cri-o/test/mocks/oci"
 	ocicnitypesmock "github.com/cri-o/cri-o/test/mocks/ocicni"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/sirupsen/logrus"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	"k8s.io/kubelet/pkg/cri/streaming"
 )
 
-// TestServer runs the created specs
+// TestServer runs the created specs.
 func TestServer(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunFrameworkSpecs(t, "Server")
@@ -52,7 +53,7 @@ var (
 	testManifest      []byte
 	testPath          string
 	testSandbox       *sandbox.Sandbox
-	testStreamService server.StreamService
+	testStreamService *server.StreamService
 
 	emptyDir string
 )
@@ -66,6 +67,17 @@ var _ = BeforeSuite(func() {
 	t = NewTestFramework(NilFunc, NilFunc)
 	t.Setup()
 
+	emptyDir = t.MustTempDir("crio-empty")
+})
+
+var _ = AfterSuite(func() {
+	t.Teardown()
+})
+
+var beforeEach = func() {
+	// Only log panics for now
+	logrus.SetLevel(logrus.PanicLevel)
+
 	// Setup the mocks
 	mockCtrl = gomock.NewController(GinkgoT())
 	libMock = libmock.NewMockIface(mockCtrl)
@@ -75,18 +87,6 @@ var _ = BeforeSuite(func() {
 	imageCloserMock = imagetypesmock.NewMockImageCloser(mockCtrl)
 	cniPluginMock = ocicnitypesmock.NewMockCNIPlugin(mockCtrl)
 	ociRuntimeMock = ocimock.NewMockRuntimeImpl(mockCtrl)
-
-	emptyDir = t.MustTempDir("crio-empty")
-})
-
-var _ = AfterSuite(func() {
-	t.Teardown()
-	mockCtrl.Finish()
-})
-
-var beforeEach = func() {
-	// Only log panics for now
-	logrus.SetLevel(logrus.PanicLevel)
 
 	// Setup test data
 	testManifest = []byte(`{
@@ -145,6 +145,8 @@ var beforeEach = func() {
 	serverConfig.LogDir = path.Join(testPath, "log")
 	serverConfig.CleanShutdownFile = path.Join(testPath, "clean.shutdown")
 	serverConfig.EnablePodEvents = true
+	serverConfig.Seccomp().SetNotifierPath(t.MustTempDir("seccomp-notifier"))
+	serverConfig.NRI.SocketPath = t.MustTempDir("nri")
 
 	// We want a directory that is guaranteed to exist, but it must
 	// be empty so we don't erroneously load anything and make tests
@@ -168,7 +170,7 @@ var beforeEach = func() {
 
 	// Initialize test streaming server
 	streamServerConfig := streaming.DefaultConfig
-	testStreamService = server.StreamService{}
+	testStreamService = &server.StreamService{}
 	testStreamService.SetRuntimeServer(sut)
 	server, err := streaming.NewServer(streamServerConfig, testStreamService)
 	Expect(err).ToNot(HaveOccurred())
@@ -179,6 +181,7 @@ var afterEach = func() {
 	os.RemoveAll(testPath)
 	os.RemoveAll("state.json")
 	os.RemoveAll("config.json")
+	mockCtrl.Finish()
 }
 
 var setupSUT = func() {
@@ -191,19 +194,21 @@ var setupSUT = func() {
 	// Inject the mock
 	sut.SetStorageImageServer(imageServerMock)
 	sut.SetStorageRuntimeServer(runtimeServerMock)
-
-	gomock.InOrder(cniPluginMock.EXPECT().Status().Return(nil))
-	Expect(sut.SetCNIPlugin(cniPluginMock)).To(Succeed())
 }
 
 func mockNewServer() {
+	GinkgoHelper()
 	gomock.InOrder(
+		cniPluginMock.EXPECT().Status().Return(nil),
 		libMock.EXPECT().GetData().Times(2).Return(serverConfig),
 		libMock.EXPECT().GetStore().Return(storeMock, nil),
 		libMock.EXPECT().GetData().Return(serverConfig),
 		storeMock.EXPECT().Containers().
 			Return([]cstorage.Container{}, nil),
+		cniPluginMock.EXPECT().GC(gomock.Any(), gomock.Any()).
+			Return(nil).AnyTimes(),
 	)
+	Expect(serverConfig.SetCNIPlugin(cniPluginMock)).To(Succeed())
 }
 
 func addContainerAndSandbox() {
@@ -237,10 +242,10 @@ func createDummyConfig() {
 	Expect(os.WriteFile("config.json", []byte(`{"linux":{},"process":{}}`), 0o644)).To(Succeed())
 }
 
-func mockRuncInLibConfig() {
+func mockRuntimeInLibConfig() {
 	echo, err := exec.LookPath("echo")
 	Expect(err).ToNot(HaveOccurred())
-	serverConfig.Runtimes["runc"] = &config.RuntimeHandler{
+	serverConfig.Runtimes[config.DefaultRuntime] = &config.RuntimeHandler{
 		RuntimePath: echo,
 	}
 }

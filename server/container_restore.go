@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,15 +9,15 @@ import (
 
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
 	"github.com/containers/storage/pkg/archive"
+	spec "github.com/opencontainers/runtime-spec/specs-go"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	kubetypes "k8s.io/kubelet/pkg/types"
+
 	"github.com/cri-o/cri-o/internal/factory/container"
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/pkg/annotations"
-	spec "github.com/opencontainers/runtime-spec/specs-go"
-	"golang.org/x/net/context"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	kubetypes "k8s.io/kubelet/pkg/types"
 )
 
 // checkIfCheckpointOCIImage returns checks if the input refers to a checkpoint image.
@@ -49,11 +50,11 @@ func (s *Server) checkIfCheckpointOCIImage(ctx context.Context, input string) (*
 	return &status.ID, nil
 }
 
-// taken from Podman
+// taken from Podman.
 func (s *Server) CRImportCheckpoint(
 	ctx context.Context,
 	createConfig *types.ContainerConfig,
-	sbID, sandboxUID string,
+	sb *sandbox.Sandbox, sandboxUID string,
 ) (ctrID string, retErr error) {
 	var mountPoint string
 
@@ -74,6 +75,16 @@ func (s *Server) CRImportCheckpoint(
 
 	var restoreArchivePath string
 	if restoreStorageImageID != nil {
+		systemCtx, err := s.contextForNamespace(sb.Metadata().Namespace)
+		if err != nil {
+			return "", fmt.Errorf("get context for namespace: %w", err)
+		}
+		// WARNING: This hard-codes an assumption that SignaturePolicyPath set specifically for the namespace is never less restrictive
+		// than the default system-wide policy, i.e. that if an image is successfully pulled, it always conforms to the system-wide policy.
+		if systemCtx.SignaturePolicyPath != "" {
+			return "", fmt.Errorf("namespaced signature policy %s defined for pods in namespace %s; signature validation is not supported for container restore", systemCtx.SignaturePolicyPath, sb.Metadata().Namespace)
+		}
+
 		log.Debugf(ctx, "Restoring from oci image %s", inputImage)
 
 		// This is not out-of-process, but it is at least out of the CRI-O codebase; containers/storage uses raw strings.
@@ -143,14 +154,6 @@ func (s *Server) CRImportCheckpoint(
 		return "", fmt.Errorf("failed to read %q: %w", metadata.ConfigDumpFile, err)
 	}
 
-	if sbID == "" {
-		// restore into previous sandbox
-		sbID = dumpSpec.Annotations[annotations.SandboxID]
-		ctrID = config.ID
-	} else {
-		ctrID = ""
-	}
-
 	ctrMetadata := types.ContainerMetadata{}
 	originalAnnotations := make(map[string]string)
 	originalLabels := make(map[string]string)
@@ -215,14 +218,6 @@ func (s *Server) CRImportCheckpoint(
 				originalAnnotations["io.kubernetes.container.hash"] = createAnnotations["io.kubernetes.container.hash"]
 			}
 		}
-	}
-
-	sb, err := s.getPodSandboxFromRequest(ctx, sbID)
-	if err != nil {
-		if errors.Is(err, sandbox.ErrIDEmpty) {
-			return "", err
-		}
-		return "", fmt.Errorf("specified sandbox not found: %s: %w", sbID, err)
 	}
 
 	stopMutex := sb.StopMutex()
@@ -366,7 +361,7 @@ func (s *Server) CRImportCheckpoint(
 		return "", fmt.Errorf("setting container config: %w", err)
 	}
 
-	if err := ctr.SetNameAndID(ctrID); err != nil {
+	if err := ctr.SetNameAndID(""); err != nil {
 		return "", fmt.Errorf("setting container name and ID: %w", err)
 	}
 

@@ -3,26 +3,23 @@ package metrics
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
-	"sync"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/process"
-	"github.com/cri-o/cri-o/internal/storage/references"
-	libconfig "github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/server/otel-collector/collectors"
-	"github.com/fsnotify/fsnotify"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
-	"k8s.io/client-go/util/cert"
+
+	"github.com/cri-o/cri-o/internal/cert"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/process"
+	"github.com/cri-o/cri-o/internal/storage/references"
+	libconfig "github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/server/metrics/collectors"
 )
 
 // SinceInMicroseconds gets the time since the specified start in microseconds.
@@ -251,7 +248,7 @@ func Instance() *Metrics {
 }
 
 // Start starts serving the metrics in the background.
-func (m *Metrics) Start(stop chan struct{}) error {
+func (m *Metrics) Start(ctx context.Context, stop chan struct{}) error {
 	if m.config == nil {
 		return errors.New("provided config is nil")
 	}
@@ -262,7 +259,7 @@ func (m *Metrics) Start(stop chan struct{}) error {
 	}
 
 	metricsAddress := net.JoinHostPort(m.config.MetricsHost, strconv.Itoa(m.config.MetricsPort))
-	if err := m.startEndpoint(stop, "tcp", metricsAddress, me); err != nil {
+	if err := m.startEndpoint(ctx, stop, "tcp", metricsAddress, me); err != nil {
 		return fmt.Errorf("create metrics endpoint on %s: %w", metricsAddress, err)
 	}
 
@@ -272,7 +269,7 @@ func (m *Metrics) Start(stop chan struct{}) error {
 			return fmt.Errorf("removing unused socket %s: %w", metricsSocket, err)
 		}
 
-		if err := m.startEndpoint(stop, "unix", m.config.MetricsSocket, me); err != nil {
+		if err := m.startEndpoint(ctx, stop, "unix", m.config.MetricsSocket, me); err != nil {
 			return fmt.Errorf("creating metrics endpoint socket: %w", err)
 		}
 		return nil
@@ -436,7 +433,7 @@ func (m *Metrics) createEndpoint() (*http.ServeMux, error) {
 }
 
 func (m *Metrics) startEndpoint(
-	stop chan struct{}, network, address string, me http.Handler,
+	ctx context.Context, stop chan struct{}, network, address string, me http.Handler,
 ) error {
 	l, err := net.Listen(network, address)
 	if err != nil {
@@ -451,170 +448,45 @@ func (m *Metrics) startEndpoint(
 		}
 
 		if m.config.MetricsCert != "" && m.config.MetricsKey != "" {
-			logrus.Infof("Serving metrics on %s using HTTPS", address)
+			log.Infof(ctx, "Serving metrics on %s using HTTPS", address)
 
-			kpr, reloadErr := newCertReloader(
-				stop, m.config.MetricsCert, m.config.MetricsKey,
-			)
-			if reloadErr != nil {
-				logrus.Fatalf("Creating key pair reloader: %v", reloadErr)
+			if err = cert.GenerateSelfSignedCertKey(ctx, m.config.MetricsCert, m.config.MetricsKey); err != nil {
+				log.Fatalf(ctx, "Generating self-signed cert/key: %v", err)
+			}
+
+			var cc *cert.Config
+			cc, err = cert.NewCertConfig(ctx, stop, m.config.MetricsCert, m.config.MetricsKey, "")
+			if err != nil {
+				log.Fatalf(ctx, "Creating key pair reloader: %v", err)
 			}
 
 			srv.TLSConfig = &tls.Config{
-				GetCertificate: kpr.getCertificate,
-				MinVersion:     tls.VersionTLS12,
+				GetConfigForClient: cc.GetConfigForClient,
+				MinVersion:         tls.VersionTLS12,
 			}
 
 			go func() {
 				<-stop
-				if err := srv.Shutdown(context.Background()); err != nil {
-					logrus.Errorf("Error on metrics server shutdown: %v", err)
+				if err := srv.Shutdown(ctx); err != nil {
+					log.Errorf(ctx, "Error on metrics server shutdown: %v", err)
 				}
 			}()
 			err = srv.ServeTLS(l, m.config.MetricsCert, m.config.MetricsKey)
 		} else {
-			logrus.Infof("Serving metrics on %s using HTTP", address)
+			log.Infof(ctx, "Serving metrics on %s using HTTP", address)
 			go func() {
 				<-stop
-				if err := srv.Shutdown(context.Background()); err != nil {
-					logrus.Errorf("Error on metrics server shutdown: %v", err)
+				if err := srv.Shutdown(ctx); err != nil {
+					log.Errorf(ctx, "Error on metrics server shutdown: %v", err)
 				}
 			}()
 			err = srv.Serve(l)
 		}
 
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logrus.Errorf("Failed to serve metrics endpoint %v: %v", l, err)
+			log.Errorf(ctx, "Failed to serve metrics endpoint %v: %v", l, err)
 		}
 	}()
 
 	return nil
-}
-
-type certReloader struct {
-	certLock    sync.RWMutex
-	certificate *tls.Certificate
-	certPath    string
-	keyPath     string
-}
-
-func newCertReloader(doneChan chan struct{}, certPath, keyPath string) (*certReloader, error) {
-	reloader := &certReloader{
-		certPath: certPath,
-		keyPath:  keyPath,
-	}
-
-	// Generate self-signed certificate and key if the provided ones are not
-	// available.
-	_, errCertPath := os.Stat(certPath)
-	_, errKeyPath := os.Stat(keyPath)
-	if errCertPath != nil && os.IsNotExist(errCertPath) &&
-		errKeyPath != nil && os.IsNotExist(errKeyPath) {
-		logrus.Info("Metrics key and cert path does not exist, generating self-signed")
-
-		hostname, err := os.Hostname()
-		if err != nil {
-			return nil, fmt.Errorf("retrieve hostname: %w", err)
-		}
-
-		certBytes, keyBytes, err := cert.GenerateSelfSignedCertKey(hostname, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("generate self-signed cert/key: %w", err)
-		}
-
-		for path, bytes := range map[string][]byte{
-			certPath: certBytes,
-			keyPath:  keyBytes,
-		} {
-			if err := os.MkdirAll(filepath.Dir(path), os.FileMode(0o700)); err != nil {
-				return nil, fmt.Errorf("create path: %w", err)
-			}
-			if err := os.WriteFile(path, bytes, os.FileMode(0o600)); err != nil {
-				return nil, fmt.Errorf("write file: %w", err)
-			}
-		}
-	}
-
-	if err := reloader.reload(); err != nil {
-		return nil, fmt.Errorf("load certificate: %w", err)
-	}
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, fmt.Errorf("create new watcher: %w", err)
-	}
-	go func() {
-		defer watcher.Close()
-		done := make(chan struct{})
-		go func() {
-			for {
-				select {
-				case event := <-watcher.Events:
-					logrus.Debugf(
-						"Got cert watcher event for %s (%s), reloading certificates",
-						event.Name, event.Op.String(),
-					)
-					if err := reloader.reload(); err != nil {
-						logrus.Warnf("Keeping previous certificates: %v", err)
-					}
-				case err := <-watcher.Errors:
-					logrus.Errorf("Cert watcher error: %v", err)
-					close(done)
-					return
-				case <-doneChan:
-					logrus.Debug("Closing cert watcher")
-					close(done)
-					return
-				}
-			}
-		}()
-		for _, f := range []string{certPath, keyPath} {
-			logrus.Debugf("Watching file %s for changes", f)
-			if err := watcher.Add(f); err != nil {
-				logrus.Fatalf("Unable to watch %s: %v", f, err)
-			}
-		}
-		<-done
-	}()
-
-	return reloader, nil
-}
-
-func (c *certReloader) reload() error {
-	certificate, err := tls.LoadX509KeyPair(c.certPath, c.keyPath)
-	if err != nil {
-		return fmt.Errorf("load x509 key pair: %w", err)
-	}
-	if len(certificate.Certificate) == 0 {
-		return errors.New("certificates chain is empty")
-	}
-
-	x509Cert, err := x509.ParseCertificate(certificate.Certificate[0])
-	if err != nil {
-		return fmt.Errorf("parse x509 certificate: %w", err)
-	}
-	logrus.Infof(
-		"Metrics certificate is valid between %v and %v",
-		x509Cert.NotBefore, x509Cert.NotAfter,
-	)
-
-	now := time.Now()
-	if now.After(x509Cert.NotAfter) {
-		return errors.New("certificate is not valid any more")
-	}
-	if now.Before(x509Cert.NotBefore) {
-		return errors.New("certificate is not yet valid")
-	}
-
-	c.certLock.Lock()
-	c.certificate = &certificate
-	c.certLock.Unlock()
-
-	return nil
-}
-
-func (c *certReloader) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	c.certLock.RLock()
-	defer c.certLock.RUnlock()
-	return c.certificate, nil
 }

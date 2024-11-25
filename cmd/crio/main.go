@@ -11,21 +11,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/containers/kubensmnt"
 	"github.com/containers/storage/pkg/reexec"
-	"github.com/cri-o/cri-o/internal/criocli"
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/internal/opentelemetry"
-	"github.com/cri-o/cri-o/internal/signals"
-	"github.com/cri-o/cri-o/internal/version"
-	libconfig "github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/server"
-	otel_collector "github.com/cri-o/cri-o/server/otel-collector"
-	"github.com/cri-o/cri-o/utils"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	"github.com/sirupsen/logrus"
 	"github.com/soheilhy/cmux"
@@ -36,26 +28,33 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	v1 "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/criocli"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/log/interceptors"
+	"github.com/cri-o/cri-o/internal/opentelemetry"
+	"github.com/cri-o/cri-o/internal/signals"
+	"github.com/cri-o/cri-o/internal/version"
+	libconfig "github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/server"
+	"github.com/cri-o/cri-o/utils"
 )
 
 func writeCrioGoroutineStacks() {
-	path := filepath.Join("/tmp", fmt.Sprintf(
-		"crio-goroutine-stacks-%s.log",
-		strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", ""),
-	))
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("crio-goroutine-stacks-%s.log", criocli.Timestamp()))
 	if err := utils.WriteGoroutineStacksToFile(path); err != nil {
 		logrus.Warnf("Failed to write goroutine stacks: %s", err)
 	}
 }
 
-func catchShutdown(ctx context.Context, cancel context.CancelFunc, gserver *grpc.Server, tp *sdktrace.TracerProvider, sserver *server.Server, hserver *http.Server, signalled *bool) {
+func catchShutdown(ctx context.Context, cancel context.CancelFunc, gserver *grpc.Server, tp *sdktrace.TracerProvider, streamingServer *server.Server, hserver *http.Server, signalled *bool) {
 	sig := make(chan os.Signal, 2048)
 	signal.Notify(sig, signals.Interrupt, signals.Term, unix.SIGUSR1, unix.SIGUSR2, unix.SIGPIPE, signals.Hup)
 	go func() {
 		for s := range sig {
 			log.WithFields(ctx, logrus.Fields{
 				"signal": s,
-			}).Debug("received signal")
+			}).Debug("Received signal")
 			switch s {
 			case unix.SIGUSR1:
 				writeCrioGoroutineStacks()
@@ -79,13 +78,13 @@ func catchShutdown(ctx context.Context, cancel context.CancelFunc, gserver *grpc
 				}
 			}
 			gserver.GracefulStop()
-			hserver.Shutdown(ctx) // nolint: errcheck
-			if err := sserver.StopStreamServer(); err != nil {
+			hserver.Shutdown(ctx) //nolint: errcheck
+			if err := streamingServer.StopStreamServer(); err != nil {
 				log.Warnf(ctx, "Error shutting down streaming server: %v", err)
 			}
-			sserver.StopMonitors()
+			streamingServer.StopMonitors()
 			cancel()
-			if err := sserver.Shutdown(ctx); err != nil {
+			if err := streamingServer.Shutdown(ctx); err != nil {
 				log.Warnf(ctx, "Error shutting down main service %v", err)
 			}
 			return
@@ -132,7 +131,7 @@ func main() {
 		logrus.Fatal(err)
 	}
 
-	app.Version = version.Version + "\n" + info.String()
+	app.Version = strings.TrimSpace(strings.ReplaceAll(strings.TrimPrefix(info.String(), "Version: "), "\n", "\n   "))
 
 	app.Flags, app.Metadata, err = criocli.GetFlagsAndMetadata()
 	if err != nil {
@@ -148,25 +147,29 @@ func main() {
 	}
 
 	app.Commands = criocli.DefaultCommands
-	app.Commands = append(app.Commands, []*cli.Command{
+	app.Commands = append(app.Commands,
+		criocli.CheckCommand,
 		criocli.ConfigCommand,
 		criocli.PublishCommand,
+		criocli.StatusCommand,
 		criocli.VersionCommand,
 		criocli.WipeCommand,
-		criocli.StatusCommand,
-	}...)
+	)
+
+	slices.SortFunc(app.Commands, func(a, b *cli.Command) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 
 	app.Before = func(c *cli.Context) (err error) {
-		config, err := criocli.GetAndMergeConfigFromContext(c)
-		if err != nil {
-			return err
-		}
-
 		logrus.SetFormatter(&logrus.TextFormatter{
-			TimestampFormat: "2006-01-02 15:04:05.000000000Z07:00",
+			TimestampFormat: time.RFC3339Nano,
 			FullTimestamp:   true,
 		})
-		info.LogVersion()
+
+		config, err := criocli.GetAndMergeConfigFromContext(c)
+		if err != nil {
+			return fmt.Errorf("get and merge config from context: %w", err)
+		}
 
 		level, err := logrus.ParseLevel(config.LogLevel)
 		if err != nil {
@@ -211,7 +214,9 @@ func main() {
 	}
 
 	app.Action = func(c *cli.Context) error {
-		ctx, cancel := context.WithCancel(context.Background())
+		info.LogVersion()
+
+		ctx, cancel := context.WithCancel(c.Context)
 
 		cpuProfilePath := c.String("profile-cpu")
 		if cpuProfilePath != "" {
@@ -233,7 +238,7 @@ func main() {
 
 		if c.Bool("profile") {
 			profilePort := c.Int("profile-port")
-			profileEndpoint := fmt.Sprintf("localhost:%v", profilePort)
+			profileEndpoint := fmt.Sprintf("127.0.0.1:%d", profilePort)
 			go func() {
 				logrus.Debugf("Starting profiling server on %v", profileEndpoint)
 				if err := http.ListenAndServe(profileEndpoint, nil); err != nil {
@@ -314,10 +319,10 @@ func main() {
 		}
 		grpcServer := grpc.NewServer(
 			grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
-				otel_collector.UnaryInterceptor(),
+				interceptors.UnaryInterceptor(),
 			)),
 			grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
-				otel_collector.StreamInterceptor(),
+				interceptors.StreamInterceptor(),
 			)),
 			grpc.StatsHandler(otelgrpc.NewServerHandler(opts...)),
 			grpc.MaxSendMsgSize(config.GRPCMaxSendMsgSize),
@@ -422,9 +427,7 @@ func main() {
 		go func() {
 			defer close(serverCloseCh)
 			if err := m.Serve(); err != nil {
-				if graceful && strings.Contains(strings.ToLower(err.Error()), "use of closed network connection") {
-					err = nil
-				} else {
+				if !graceful || !strings.Contains(strings.ToLower(err.Error()), "use of closed network connection") {
 					logrus.Errorf("Failed to serve grpc request: %v", err)
 				}
 			}

@@ -5,10 +5,10 @@ import (
 	"errors"
 	"io"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/sirupsen/logrus"
+	"go.uber.org/mock/gomock"
 
 	"github.com/cri-o/cri-o/internal/config/ociartifact"
 	"github.com/cri-o/cri-o/internal/config/seccomp/seccompociartifact"
@@ -16,7 +16,7 @@ import (
 	seccompociartifactmock "github.com/cri-o/cri-o/test/mocks/seccompociartifact"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("SeccompOCIArtifact", func() {
 	t.Describe("TryPull", func() {
 		const testProfileContent = "{}"

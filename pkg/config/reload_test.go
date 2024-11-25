@@ -1,16 +1,19 @@
 package config_test
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/containers/common/pkg/apparmor"
-	"github.com/cri-o/cri-o/pkg/config"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/pkg/config"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Config", func() {
 	BeforeEach(beforeEach)
 
@@ -18,7 +21,7 @@ var _ = t.Describe("Config", func() {
 		modifyDefaultConfig := func(old, new string) {
 			filePath := t.MustTempFile("config")
 			Expect(sut.ToFile(filePath)).To(Succeed())
-			Expect(sut.UpdateFromFile(filePath)).To(Succeed())
+			Expect(sut.UpdateFromFile(context.Background(), filePath)).To(Succeed())
 
 			read, err := os.ReadFile(filePath)
 			Expect(err).ToNot(HaveOccurred())
@@ -32,10 +35,10 @@ var _ = t.Describe("Config", func() {
 			// Given
 			filePath := t.MustTempFile("config")
 			Expect(sut.ToFile(filePath)).To(Succeed())
-			Expect(sut.UpdateFromFile(filePath)).To(Succeed())
+			Expect(sut.UpdateFromFile(context.Background(), filePath)).To(Succeed())
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -49,7 +52,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -63,7 +66,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).To(HaveOccurred())
@@ -77,7 +80,7 @@ var _ = t.Describe("Config", func() {
 			)
 
 			// When
-			err := sut.Reload()
+			err := sut.Reload(context.Background())
 
 			// Then
 			Expect(err).ToNot(HaveOccurred())
@@ -341,6 +344,11 @@ var _ = t.Describe("Config", func() {
 	})
 
 	t.Describe("ReloadRuntimes", func() {
+		var existingRuntimePath string
+		BeforeEach(func() {
+			existingRuntimePath = filepath.Join(t.EnsureRuntimeDeps(), config.DefaultRuntime)
+		})
+
 		It("should succeed without any config change", func() {
 			// Given
 			// When
@@ -365,7 +373,7 @@ var _ = t.Describe("Config", func() {
 		It("should add a new runtime", func() {
 			// Given
 			newRuntimeHandler := &config.RuntimeHandler{
-				RuntimePath:                  "/usr/bin/runc",
+				RuntimePath:                  existingRuntimePath,
 				PrivilegedWithoutHostDevices: true,
 			}
 			newConfig := &config.Config{}
@@ -383,7 +391,7 @@ var _ = t.Describe("Config", func() {
 		It("should change the default runtime", func() {
 			// Given
 			sut.Runtimes["existing"] = &config.RuntimeHandler{
-				RuntimePath: "/usr/bin/runc",
+				RuntimePath: existingRuntimePath,
 			}
 			newConfig := &config.Config{}
 			newConfig.Runtimes = sut.Runtimes
@@ -400,12 +408,12 @@ var _ = t.Describe("Config", func() {
 		It("should overwrite existing runtime", func() {
 			// Given
 			existingRuntime := &config.RuntimeHandler{
-				RuntimePath: "/usr/bin/runc",
+				RuntimePath: existingRuntimePath,
 			}
 			sut.Runtimes["existing"] = existingRuntime
 
 			newRuntime := &config.RuntimeHandler{
-				RuntimePath:                  "/usr/bin/runc",
+				RuntimePath:                  existingRuntimePath,
 				PrivilegedWithoutHostDevices: true,
 			}
 			newConfig := &config.Config{}
@@ -419,6 +427,30 @@ var _ = t.Describe("Config", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sut.Runtimes).To(HaveKeyWithValue("existing", newRuntime))
 			Expect(sut.Runtimes["existing"].PrivilegedWithoutHostDevices).To(BeTrue())
+		})
+
+		It("should inherit runtime config", func() {
+			// Given
+			newRuntime := &config.RuntimeHandler{
+				RuntimePath:           invalidPath,
+				InheritDefaultRuntime: true,
+			}
+			defaultRuntime := &config.RuntimeHandler{
+				RuntimePath: existingRuntimePath,
+			}
+			newConfig := &config.Config{}
+			newConfig.DefaultRuntime = "default"
+			newConfig.Runtimes = make(config.Runtimes)
+			newConfig.Runtimes["default"] = defaultRuntime
+			newConfig.Runtimes["new"] = newRuntime
+
+			// When
+			err := sut.ReloadRuntimes(newConfig)
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sut.Runtimes).To(HaveKeyWithValue("new", newRuntime))
+			Expect(sut.Runtimes["new"].RuntimePath).To(Equal(existingRuntimePath))
 		})
 	})
 

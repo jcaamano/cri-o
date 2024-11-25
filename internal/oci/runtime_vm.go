@@ -2,6 +2,7 @@ package oci
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -31,6 +32,15 @@ import (
 	"github.com/containerd/ttrpc"
 	"github.com/containerd/typeurl"
 	conmonconfig "github.com/containers/conmon/runner/config"
+	katavolume "github.com/kata-containers/kata-containers/src/runtime/virtcontainers/types"
+	rspec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
+	anypb "google.golang.org/protobuf/types/known/anypb"
+	"k8s.io/client-go/tools/remotecommand"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	utilexec "k8s.io/utils/exec"
+
 	"github.com/cri-o/cri-o/internal/config/cgmgr"
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/pkg/annotations"
@@ -38,15 +48,6 @@ import (
 	"github.com/cri-o/cri-o/server/metrics"
 	"github.com/cri-o/cri-o/utils"
 	"github.com/cri-o/cri-o/utils/errdefs"
-	katavolume "github.com/kata-containers/kata-containers/src/runtime/virtcontainers/types"
-	rspec "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
-	"golang.org/x/sys/unix"
-	anypb "google.golang.org/protobuf/types/known/anypb"
-	"k8s.io/client-go/tools/remotecommand"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	utilexec "k8s.io/utils/exec"
 )
 
 // runtimeVM is the Runtime interface implementation that is more appropriate
@@ -78,7 +79,7 @@ const (
 	execTimeout = -2
 )
 
-// newRuntimeVM creates a new runtimeVM instance
+// newRuntimeVM creates a new runtimeVM instance.
 func newRuntimeVM(handler *config.RuntimeHandler, exitsPath string) RuntimeImpl {
 	logrus.Debug("oci.newRuntimeVM() start")
 	defer logrus.Debug("oci.newRuntimeVM() end")
@@ -109,12 +110,12 @@ func newRuntimeVM(handler *config.RuntimeHandler, exitsPath string) RuntimeImpl 
 func addVolumeMountsToCreateRequest(ctx context.Context, request *task.CreateTaskRequest, c *Container) error {
 	// To make the kata agent pull the image{"volume_type":"image_guest_pull","source":"quay.io/kata-containers/confidential-containers:unsigned","fs_type":"overlayfs","image_pull":{"metadata":{}}}
 
-	imageSource := c.Spec().Annotations[annotations.ImageName]
-	log.Infof(ctx, "Adding mount info to pull image %s", imageSource)
+	someNameOfTheImageSource := c.Spec().Annotations[annotations.SomeNameOfTheImage]
+	log.Infof(ctx, "Adding mount info to pull image %s", someNameOfTheImageSource)
 
 	volume := &katavolume.KataVirtualVolume{
 		VolumeType: katavolume.KataVirtualVolumeImageGuestPullType,
-		Source:     imageSource,
+		Source:     someNameOfTheImageSource,
 		FSType:     "overlay_fs",
 		ImagePull:  &katavolume.ImagePullVolume{Metadata: c.Spec().Annotations},
 	}
@@ -213,7 +214,7 @@ func (r *runtimeVM) CreateContainer(ctx context.Context, c *Container, cgroupPar
 		// Create the container
 		if resp, err := r.task.Create(r.ctx, request); err != nil {
 			createdCh <- errdefs.FromGRPC(err)
-		} else if err := c.state.SetInitPid(int(resp.Pid)); err != nil {
+		} else if err := c.state.SetInitPid(int(resp.GetPid())); err != nil {
 			createdCh <- err
 		}
 
@@ -578,7 +579,7 @@ func (r *runtimeVM) execContainerCommon(ctx context.Context, c *Container, cmd [
 	return exitCode, err
 }
 
-// UpdateContainer updates container resources
+// UpdateContainer updates container resources.
 func (r *runtimeVM) UpdateContainer(ctx context.Context, c *Container, res *rspec.LinuxResources) error {
 	log.Debugf(ctx, "RuntimeVM.UpdateContainer() start")
 	defer log.Debugf(ctx, "RuntimeVM.UpdateContainer() end")
@@ -608,7 +609,7 @@ func (r *runtimeVM) StopContainer(ctx context.Context, c *Container, timeout int
 	log.Debugf(ctx, "RuntimeVM.StopContainer() start")
 	defer log.Debugf(ctx, "RuntimeVM.StopContainer() end")
 
-	if err := c.ShouldBeStopped(); err != nil {
+	if err := r.shouldBeStopped(ctx, c); err != nil {
 		if errors.Is(err, ErrContainerStopped) {
 			err = nil
 		}
@@ -666,6 +667,27 @@ func (r *runtimeVM) StopContainer(ctx context.Context, c *Container, timeout int
 	}
 
 	c.state.Finished = time.Now()
+	return nil
+}
+
+// shouldBeStopped checks whether the container's state permits
+// stopping. It determines if stopping the container makes sense
+// based on its current state. A container cannot be stopped if
+// it is already stopped or paused. If the container is paused,
+// the function attempts to unpause it and update its status.
+func (r *runtimeVM) shouldBeStopped(ctx context.Context, c *Container) error {
+	switch c.State().Status {
+	case ContainerStateStopped:
+		return ErrContainerStopped
+	case ContainerStatePaused:
+		log.Warnf(ctx, "Cannot stop paused container %s", c.ID())
+		if err := r.UnpauseContainer(ctx, c); err != nil {
+			return fmt.Errorf("failed to stop container %s: %w", c.Name(), err)
+		}
+		if err := r.UpdateContainerStatus(ctx, c); err != nil {
+			return fmt.Errorf("failed to update container status %s: %w", c.Name(), err)
+		}
+	}
 	return nil
 }
 
@@ -786,7 +808,7 @@ func (r *runtimeVM) updateContainerStatus(ctx context.Context, c *Container) err
 	}
 
 	status := c.state.Status
-	switch response.Status {
+	switch response.GetStatus() {
 	case tasktypes.Status_CREATED:
 		status = ContainerStateCreated
 	case tasktypes.Status_RUNNING:
@@ -798,10 +820,10 @@ func (r *runtimeVM) updateContainerStatus(ctx context.Context, c *Container) err
 	}
 
 	c.state.Status = status
-	c.state.Finished = response.ExitedAt.AsTime()
-	exitCode := int32(response.ExitStatus)
+	c.state.Finished = response.GetExitedAt().AsTime()
+	exitCode := int32(response.GetExitStatus())
 	c.state.ExitCode = &exitCode
-	c.state.Pid = int(response.Pid)
+	c.state.Pid = int(response.GetPid())
 
 	if exitCode != 0 {
 		oomFilePath := filepath.Join(c.bundlePath, "oom")
@@ -828,10 +850,10 @@ func (r *runtimeVM) restoreContainerIO(ctx context.Context, c *Container, state 
 	r.Unlock()
 
 	cioCfg := ctrio.Config{
-		Terminal: state.Terminal,
-		Stdin:    state.Stdin,
-		Stdout:   state.Stdout,
-		Stderr:   state.Stderr,
+		Terminal: state.GetTerminal(),
+		Stdin:    state.GetStdin(),
+		Stdout:   state.GetStdout(),
+		Stderr:   state.GetStderr(),
 	}
 	// The existing fifos is created by NewFIFOSetInDir. stdin, stdout, stderr should exist
 	// in a same temporary directory under r.fifoDir. crio is responsible for removing these
@@ -963,7 +985,7 @@ func (r *runtimeVM) ContainerStats(ctx context.Context, c *Container, _ string) 
 		return nil, errors.New("could not retrieve container stats")
 	}
 
-	stats, err := typeurl.UnmarshalAny(resp.Stats)
+	stats, err := typeurl.UnmarshalAny(resp.GetStats())
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract container metrics: %w", err)
 	}
@@ -1174,7 +1196,7 @@ func (r *runtimeVM) wait(ctrID, execID string) (int32, error) {
 		return -1, errdefs.ErrNotFound
 	}
 
-	return int32(resp.ExitStatus), nil
+	return int32(resp.GetExitStatus()), nil
 }
 
 func (r *runtimeVM) kill(ctrID, execID string, signal syscall.Signal, all bool) error {
@@ -1228,7 +1250,7 @@ func (r *runtimeVM) closeIO(ctrID, execID string) error {
 	return nil
 }
 
-// CheckpointContainer not implemented for runtimeVM
+// CheckpointContainer not implemented for runtimeVM.
 func (r *runtimeVM) CheckpointContainer(ctx context.Context, c *Container, specgen *rspec.Spec, leaveRunning bool) error {
 	log.Debugf(ctx, "RuntimeVM.CheckpointContainer() start")
 	defer log.Debugf(ctx, "RuntimeVM.CheckpointContainer() end")
@@ -1236,7 +1258,7 @@ func (r *runtimeVM) CheckpointContainer(ctx context.Context, c *Container, specg
 	return errors.New("checkpointing not implemented for runtimeVM")
 }
 
-// RestoreContainer not implemented for runtimeVM
+// RestoreContainer not implemented for runtimeVM.
 func (r *runtimeVM) RestoreContainer(ctx context.Context, c *Container, cgroupParent, mountLabel string) error {
 	log.Debugf(ctx, "RuntimeVM.RestoreContainer() start")
 	defer log.Debugf(ctx, "RuntimeVM.RestoreContainer() end")

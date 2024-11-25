@@ -1,14 +1,15 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 
 	"github.com/containers/storage/pkg/pools"
-	"github.com/cri-o/cri-o/internal/log"
-	"golang.org/x/net/context"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/log"
 )
 
 // PortForward prepares a streaming endpoint to forward ports from a PodSandbox.
@@ -21,7 +22,7 @@ func (s *Server) PortForward(ctx context.Context, req *types.PortForwardRequest)
 	return resp, nil
 }
 
-func (s StreamService) PortForward(ctx context.Context, podSandboxID string, port int32, stream io.ReadWriteCloser) error {
+func (s *StreamService) PortForward(ctx context.Context, podSandboxID string, port int32, stream io.ReadWriteCloser) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 

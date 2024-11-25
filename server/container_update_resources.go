@@ -1,18 +1,18 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	rspec "github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/protobuf/proto"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/utils/cpuset"
 
 	"github.com/cri-o/cri-o/internal/config/node"
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/gogo/protobuf/proto"
-	rspec "github.com/opencontainers/runtime-spec/specs-go"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	"k8s.io/utils/cpuset"
-
-	"golang.org/x/net/context"
 )
 
 // UpdateContainerResources updates ContainerConfig of the container.
@@ -86,7 +86,7 @@ func toOCIResources(r *types.LinuxContainerResources) *rspec.LinuxResources {
 	return &update
 }
 
-// reapplySharedCPUs appends shared CPUs and update the quota to handle CPUManager
+// reapplySharedCPUs appends shared CPUs and update the quota to handle CPUManager.
 func reapplySharedCPUs(c *oci.Container, req *types.UpdateContainerResourcesRequest) error {
 	const sharedCPUsEnvVar = "OPENSHIFT_SHARED_CPUS"
 	var sharedCpus string

@@ -13,16 +13,19 @@ import (
 	encconfig "github.com/containers/ocicrypt/config"
 	cryptUtils "github.com/containers/ocicrypt/utils"
 	"github.com/containers/storage/pkg/mount"
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/server/metrics"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	kubeletTypes "k8s.io/kubelet/pkg/types"
+
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/server/metrics"
 )
 
 const (
 	maxLabelSize = 4096
+
+	// defaultStopTimeout is the default container stop timeout in seconds.
+	defaultStopTimeout = 10
 )
 
 func validateLabels(labels map[string]string) error {
@@ -78,12 +81,7 @@ func mergeEnvs(imageConfig *v1.Image, kubeEnvs []*types.KeyValue) []string {
 	return envs
 }
 
-// Translate container labels to a description of the container
-func translateLabelsToDescription(labels map[string]string) string {
-	return fmt.Sprintf("%s/%s/%s", labels[kubeletTypes.KubernetesPodNamespaceLabel], labels[kubeletTypes.KubernetesPodNameLabel], labels[kubeletTypes.KubernetesContainerNameLabel])
-}
-
-// getDecryptionKeys reads the keys from the given directory
+// getDecryptionKeys reads the keys from the given directory.
 func getDecryptionKeys(keysPath string) (*encconfig.DecryptConfig, error) {
 	if _, err := os.Stat(keysPath); os.IsNotExist(err) {
 		logrus.Debugf("Skipping non-existing decryption_keys_path: %s", keysPath)
@@ -210,9 +208,8 @@ func (s *Server) getResourceOrWait(ctx context.Context, name, resourceType strin
 // for which disallowed annotations will be filtered. They may be the same.
 // After this function, toFilter will no longer container disallowed annotations.
 func (s *Server) FilterDisallowedAnnotations(toFind, toFilter map[string]string, runtimeHandler string) error {
-	// Only one of these Filter* will actually do any filtering, as the runtime DisallowedAnnotations
-	// were scrubbed at the config validation step if there were workload AllowedAnnotations configured.
-	// When runtime level allowed annotations are deprecated, this will be dropped.
+	// Combine the two lists to create one. Both will ultimately end up filtering, and FilterDisallowedAnnotations
+	// will handle duplicates, if any.
 	// TODO: eventually, this should be in the container package, but it's going through a lot of churn
 	// and SpecAddAnnotations is already passed too many arguments
 	allowed, err := s.Runtime().AllowedAnnotations(runtimeHandler)
@@ -222,4 +219,18 @@ func (s *Server) FilterDisallowedAnnotations(toFind, toFilter map[string]string,
 	allowed = append(allowed, s.config.Workloads.AllowedAnnotations(toFind)...)
 
 	return s.config.Workloads.FilterDisallowedAnnotations(allowed, toFilter)
+}
+
+// stopTimeoutFromContext returns the stop timeout in seconds for the provided
+// context. If the context has no timeout or deadline set, then it will default
+// to 10s.
+func stopTimeoutFromContext(ctx context.Context) int64 {
+	timeout := int64(defaultStopTimeout)
+	deadline, ok := ctx.Deadline()
+	if ok {
+		timeout = time.Until(deadline).Milliseconds() / 1000
+	}
+
+	log.Debugf(ctx, "Using stop timeout: %v", timeout)
+	return timeout
 }

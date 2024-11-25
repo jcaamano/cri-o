@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,18 +15,18 @@ import (
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
 	"github.com/containers/common/pkg/signal"
 	"github.com/containers/storage/pkg/idtools"
-	"github.com/cri-o/cri-o/internal/config/nsmgr"
-	"github.com/cri-o/cri-o/internal/storage"
-	"github.com/cri-o/cri-o/internal/storage/references"
-	ann "github.com/cri-o/cri-o/pkg/annotations"
 	json "github.com/json-iterator/go"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/fields"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 	kubeletTypes "k8s.io/kubelet/pkg/types"
+
+	"github.com/cri-o/cri-o/internal/config/nsmgr"
+	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/cri-o/cri-o/internal/storage/references"
+	ann "github.com/cri-o/cri-o/pkg/annotations"
 )
 
 const defaultStopSignalInt = 15
@@ -49,7 +50,7 @@ type Container struct {
 	dir        string
 	stopSignal string
 	// If set, _some_ name of the image imageID; it may have NO RELATIONSHIP to the users’ requested image name.
-	imageName             *references.RegistryImageReference
+	someNameOfTheImage    *references.RegistryImageReference
 	imageID               *storage.StorageImageID // nil for infra containers.
 	mountPoint            string
 	seccompProfilePath    string
@@ -75,6 +76,7 @@ type Container struct {
 	resources             *types.ContainerResources
 	runtimePath           string // runtime path for a given platform
 	execPIDs              map[int]bool
+	runtimeUser           *types.ContainerUser
 }
 
 func (c *Container) CRIAttributes() *types.ContainerAttributes {
@@ -94,6 +96,7 @@ type ContainerVolume struct {
 	RecursiveReadOnly bool                   `json:"recursive_read_only"`
 	Propagation       types.MountPropagation `json:"propagation"`
 	SelinuxRelabel    bool                   `json:"selinux_relabel"`
+	Image             *types.ImageSpec       `json:"image,omitempty"` // A possible image for OCI volume mounts
 }
 
 // ContainerState represents the status of a container.
@@ -118,13 +121,13 @@ type ContainerState struct {
 // NewContainer creates a container object.
 // userRequestedImage is the users' input originally used to find imageID; it might evaluate to a different image (or to a different kind of reference!)
 // at any future time.
-// imageName, if set, is _some_ name of the image imageID; it may have NO RELATIONSHIP to the users’ requested image name.
+// someNameOftheImage, if set, is _some_ name of the image imageID; it may have NO RELATIONSHIP to the users’ requested image name.
 // imageID is nil for infra containers.
 // someRepoDigest, if set, is some repo@some digest of the image imageID; it
 // may have NO RELATIONSHIP to the users’ requested image name (and, which
 // should be fixed eventually, may be a repo@digest combination which has never
 // existed on a registry).
-func NewContainer(id, name, bundlePath, logPath string, labels, crioAnnotations, annotations map[string]string, userRequestedImage string, imageName *references.RegistryImageReference, imageID *storage.StorageImageID, someRepoDigest string, md *types.ContainerMetadata, sandbox string, terminal, stdin, stdinOnce bool, runtimeHandler, dir string, created time.Time, stopSignal string) (*Container, error) {
+func NewContainer(id, name, bundlePath, logPath string, labels, crioAnnotations, annotations map[string]string, userRequestedImage string, someNameOfTheImage *references.RegistryImageReference, imageID *storage.StorageImageID, someRepoDigest string, md *types.ContainerMetadata, sandbox string, terminal, stdin, stdinOnce bool, runtimeHandler, dir string, created time.Time, stopSignal string) (*Container, error) {
 	state := &ContainerState{}
 	state.Created = created
 
@@ -133,11 +136,9 @@ func NewContainer(id, name, bundlePath, logPath string, labels, crioAnnotations,
 		imageIDString = imageID.IDStringForOutOfProcessConsumptionOnly()
 	}
 
-	externalImageRef := ""
+	externalImageRef := imageIDString
 	if someRepoDigest != "" {
 		externalImageRef = someRepoDigest
-	} else {
-		externalImageRef = imageIDString
 	}
 
 	c := &Container{
@@ -154,22 +155,22 @@ func NewContainer(id, name, bundlePath, logPath string, labels, crioAnnotations,
 			ImageRef: externalImageRef,
 			ImageId:  imageIDString,
 		},
-		name:            name,
-		bundlePath:      bundlePath,
-		logPath:         logPath,
-		terminal:        terminal,
-		stdin:           stdin,
-		stdinOnce:       stdinOnce,
-		runtimeHandler:  runtimeHandler,
-		crioAnnotations: crioAnnotations,
-		imageName:       imageName,
-		imageID:         imageID,
-		dir:             dir,
-		state:           state,
-		stopSignal:      stopSignal,
-		stopTimeoutChan: make(chan int64, 10),
-		stopWatchers:    []chan struct{}{},
-		execPIDs:        map[int]bool{},
+		name:               name,
+		bundlePath:         bundlePath,
+		logPath:            logPath,
+		terminal:           terminal,
+		stdin:              stdin,
+		stdinOnce:          stdinOnce,
+		runtimeHandler:     runtimeHandler,
+		crioAnnotations:    crioAnnotations,
+		someNameOfTheImage: someNameOfTheImage,
+		imageID:            imageID,
+		dir:                dir,
+		state:              state,
+		stopSignal:         stopSignal,
+		stopTimeoutChan:    make(chan int64, 10),
+		stopWatchers:       []chan struct{}{},
+		execPIDs:           map[int]bool{},
 	}
 	return c, nil
 }
@@ -220,13 +221,14 @@ func (c *Container) CRIContainer() *types.Container {
 	return c.criContainer
 }
 
-// SetSpec loads the OCI spec in the container struct
+// SetSpec loads the OCI spec in the container struct.
 func (c *Container) SetSpec(s *specs.Spec) {
 	c.spec = s
 	c.SetResources(s)
+	c.SetRuntimeUser(s)
 }
 
-// Spec returns a copy of the spec for the container
+// Spec returns a copy of the spec for the container.
 func (c *Container) Spec() specs.Spec {
 	if c.spec != nil {
 		return *c.spec
@@ -310,22 +312,22 @@ func (cstate *ContainerState) SetInitPid(pid int) error {
 	return nil
 }
 
-// StatePath returns the containers state.json path
+// StatePath returns the containers state.json path.
 func (c *Container) StatePath() string {
 	return filepath.Join(c.dir, "state.json")
 }
 
-// CreatedAt returns the container creation time
+// CreatedAt returns the container creation time.
 func (c *Container) CreatedAt() time.Time {
 	return c.state.Created
 }
 
-// CheckpointedAt returns the container checkpoint time
+// CheckpointedAt returns the container checkpoint time.
 func (c *Container) CheckpointedAt() time.Time {
 	return c.state.CheckpointedAt
 }
 
-// SetCheckpointedAt sets the time of checkpointing
+// SetCheckpointedAt sets the time of checkpointing.
 func (c *Container) SetCheckpointedAt(checkpointedAt time.Time) {
 	c.state.CheckpointedAt = checkpointedAt
 }
@@ -371,10 +373,10 @@ func (c *Container) UserRequestedImage() string {
 	return c.criContainer.Image.Image
 }
 
-// ImageName returns _some_ name of the image imageID, if any;
+// SomeNameOfTheImage returns _some_ name of the image imageID, if any;
 // it may have NO RELATIONSHIP to the users’ requested image name.
-func (c *Container) ImageName() *references.RegistryImageReference {
-	return c.imageName
+func (c *Container) SomeNameOfTheImage() *references.RegistryImageReference {
+	return c.someNameOfTheImage
 }
 
 // ImageID returns the image ID of the container, or nil for infra containers.
@@ -392,12 +394,12 @@ func (c *Container) SetSandbox(podSandboxID string) {
 	c.criContainer.PodSandboxId = podSandboxID
 }
 
-// Dir returns the dir of the container
+// Dir returns the dir of the container.
 func (c *Container) Dir() string {
 	return c.dir
 }
 
-// CheckpointPath returns the path to the directory containing the checkpoint
+// CheckpointPath returns the path to the directory containing the checkpoint.
 func (c *Container) CheckpointPath() string {
 	// Podman uses 'bundlePath' as base directory for the checkpoint
 	// CRI-O uses 'dir' instead of bundlePath as bundlePath seems to be
@@ -413,7 +415,7 @@ func (c *Container) Metadata() *types.ContainerMetadata {
 	return c.criContainer.Metadata
 }
 
-// State returns the state of the running container
+// State returns the state of the running container.
 func (c *Container) State() *ContainerState {
 	c.opLock.RLock()
 	defer c.opLock.RUnlock()
@@ -435,37 +437,37 @@ func (c *Container) Volumes() []ContainerVolume {
 	return c.volumes
 }
 
-// SetMountPoint sets the container mount point
+// SetMountPoint sets the container mount point.
 func (c *Container) SetMountPoint(mp string) {
 	c.mountPoint = mp
 }
 
-// MountPoint returns the container mount point
+// MountPoint returns the container mount point.
 func (c *Container) MountPoint() string {
 	return c.mountPoint
 }
 
-// SetIDMappings sets the ID/GID mappings used for the container
+// SetIDMappings sets the ID/GID mappings used for the container.
 func (c *Container) SetIDMappings(mappings *idtools.IDMappings) {
 	c.idMappings = mappings
 }
 
-// IDMappings returns the ID/GID mappings used for the container
+// IDMappings returns the ID/GID mappings used for the container.
 func (c *Container) IDMappings() *idtools.IDMappings {
 	return c.idMappings
 }
 
-// SetCreated sets the created flag to true once container is created
+// SetCreated sets the created flag to true once container is created.
 func (c *Container) SetCreated() {
 	c.created = true
 }
 
-// Created returns whether the container was created successfully
+// Created returns whether the container was created successfully.
 func (c *Container) Created() bool {
 	return c.created
 }
 
-// SetStartFailed sets the container state appropriately after a start failure
+// SetStartFailed sets the container state appropriately after a start failure.
 func (c *Container) SetStartFailed(err error) {
 	c.opLock.Lock()
 	defer c.opLock.Unlock()
@@ -476,9 +478,19 @@ func (c *Container) SetStartFailed(err error) {
 	}
 }
 
-// Description returns a description for the container
+// Description returns a description for the container.
 func (c *Container) Description() string {
-	return fmt.Sprintf("%s/%s/%s", c.Labels()[kubeletTypes.KubernetesPodNamespaceLabel], c.Labels()[kubeletTypes.KubernetesPodNameLabel], c.Labels()[kubeletTypes.KubernetesContainerNameLabel])
+	return LabelsToDescription(c.Labels())
+}
+
+// LabelsToDescription returns a string description from the provided labels.
+func LabelsToDescription(labels map[string]string) string {
+	return fmt.Sprintf(
+		"%s/%s/%s",
+		labels[kubeletTypes.KubernetesPodNamespaceLabel],
+		labels[kubeletTypes.KubernetesPodNameLabel],
+		labels[kubeletTypes.KubernetesContainerNameLabel],
+	)
 }
 
 // StdinOnce returns whether stdin once is set for the container.
@@ -586,20 +598,6 @@ func (c *Container) verifyPid() (string, error) {
 	return state, nil
 }
 
-// ShouldBeStopped checks whether the container state is in a place
-// where attempting to stop it makes sense
-// a container is not stoppable if it's paused or stopped
-// if it's paused, that's an error, and is reported as such
-func (c *Container) ShouldBeStopped() error {
-	switch c.State().Status {
-	case ContainerStateStopped: // no-op
-		return ErrContainerStopped
-	case ContainerStatePaused:
-		return errors.New("cannot stop paused container")
-	}
-	return nil
-}
-
 // Spoofed returns whether this container is spoofed.
 // A container should be spoofed when it doesn't have to exist in the container runtime,
 // but does need to exist in the storage. The main use of this is when an infra container
@@ -609,7 +607,7 @@ func (c *Container) Spoofed() bool {
 }
 
 // SetAsStopping marks a container as being stopped.
-// Returns true if the container was not set as stopping before, and false otherwise (i.e. on subsequent calls)."
+// Returns true if the container was not set as stopping before, and false otherwise (i.e. on subsequent calls).".
 func (c *Container) SetAsStopping() (setToStopping bool) {
 	c.stopLock.Lock()
 	defer c.stopLock.Unlock()
@@ -666,7 +664,7 @@ func (c *Container) IsInfra() bool {
 
 // nodeLevelPIDNamespace searches through the container spec to see if there is
 // a PID namespace specified. If not, it returns `true` (because the runtime spec
-// defines a node level namespace as being absent from the Namespaces list)
+// defines a node level namespace as being absent from the Namespaces list).
 func (c *Container) nodeLevelPIDNamespace() bool {
 	if c.spec.Linux != nil {
 		for i := range c.spec.Linux.Namespaces {
@@ -680,12 +678,12 @@ func (c *Container) nodeLevelPIDNamespace() bool {
 }
 
 // Restore returns if the container is marked as being
-// restored from a checkpoint
+// restored from a checkpoint.
 func (c *Container) Restore() bool {
 	return c.restore
 }
 
-// SetRestore marks the container as being restored from a checkpoint
+// SetRestore marks the container as being restored from a checkpoint.
 func (c *Container) SetRestore(restore bool) {
 	c.restore = restore
 }
@@ -708,7 +706,7 @@ func (c *Container) SetRestoreStorageImageID(restoreStorageImageID *storage.Stor
 	c.restoreStorageImageID = restoreStorageImageID
 }
 
-// SetResources loads the OCI Spec.Linux.Resources in the container struct
+// SetResources loads the OCI Spec.Linux.Resources in the container struct.
 func (c *Container) SetResources(s *specs.Spec) {
 	if s.Linux != nil && s.Linux.Resources != nil {
 		linuxResources := s.Linux.Resources
@@ -755,7 +753,7 @@ func (c *Container) SetResources(s *specs.Spec) {
 	}
 }
 
-// GetResources returns a copy of the Linux resources from Container
+// GetResources returns a copy of the Linux resources from Container.
 func (c *Container) GetResources() *types.ContainerResources {
 	return c.resources
 }
@@ -826,4 +824,9 @@ func (c *Container) KillExecPIDs() {
 		toKill = unkilled
 		time.Sleep(stopProcessWatchSleep)
 	}
+}
+
+// RuntimeUser returns the runtime user for the container.
+func (c *Container) RuntimeUser() *types.ContainerUser {
+	return c.runtimeUser
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"os"
 
 	"github.com/containers/image/v5/copy"
@@ -11,9 +10,10 @@ import (
 	"github.com/containers/image/v5/types"
 	sstorage "github.com/containers/storage"
 	"github.com/containers/storage/pkg/reexec"
-	"github.com/cri-o/cri-o/internal/log"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+
+	"github.com/cri-o/cri-o/internal/log"
 )
 
 func main() {
@@ -87,7 +87,7 @@ func main() {
 		importFrom := c.String("import-from")
 		exportTo := c.String("export-to")
 
-		ctx := context.Background()
+		ctx := c.Context
 
 		if debug {
 			logrus.SetLevel(logrus.DebugLevel)

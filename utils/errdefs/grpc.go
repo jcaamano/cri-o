@@ -44,17 +44,17 @@ func ToGRPC(err error) error {
 
 	switch {
 	case IsInvalidArgument(err):
-		return status.Errorf(codes.InvalidArgument, err.Error())
+		return status.Errorf(codes.InvalidArgument, "%v", err)
 	case IsNotFound(err):
-		return status.Errorf(codes.NotFound, err.Error())
+		return status.Errorf(codes.NotFound, "%v", err)
 	case IsAlreadyExists(err):
-		return status.Errorf(codes.AlreadyExists, err.Error())
+		return status.Errorf(codes.AlreadyExists, "%v", err)
 	case IsFailedPrecondition(err):
-		return status.Errorf(codes.FailedPrecondition, err.Error())
+		return status.Errorf(codes.FailedPrecondition, "%v", err)
 	case IsUnavailable(err):
-		return status.Errorf(codes.Unavailable, err.Error())
+		return status.Errorf(codes.Unavailable, "%v", err)
 	case IsNotImplemented(err):
-		return status.Errorf(codes.Unimplemented, err.Error())
+		return status.Errorf(codes.Unimplemented, "%v", err)
 	}
 
 	return err
@@ -62,11 +62,11 @@ func ToGRPC(err error) error {
 
 // ToGRPCf maps the error to grpc error codes, assembling the formatting string
 // and combining it with the target error string.
-func ToGRPCf(err error, format string, args ...interface{}) error {
+func ToGRPCf(err error, format string, args ...any) error {
 	return ToGRPC(fmt.Errorf(format+": %w", append(args, err)...))
 }
 
-// FromGRPC returns the underlying error from a grpc service based on the grpc error code
+// FromGRPC returns the underlying error from a grpc service based on the grpc error code.
 func FromGRPC(err error) error {
 	if err == nil {
 		return nil

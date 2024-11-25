@@ -5,13 +5,14 @@ import (
 	"os"
 
 	cstorage "github.com/containers/storage"
-	"github.com/cri-o/cri-o/server"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
+
+	"github.com/cri-o/cri-o/server"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Server", func() {
 	// Prepare the sut
 	BeforeEach(beforeEach)
@@ -82,6 +83,7 @@ var _ = t.Describe("Server", func() {
 		It("should succeed with container restore", func() {
 			// Given
 			gomock.InOrder(
+				cniPluginMock.EXPECT().Status().Return(nil),
 				libMock.EXPECT().GetData().Times(2).Return(serverConfig),
 				libMock.EXPECT().GetStore().Return(storeMock, nil),
 				libMock.EXPECT().GetData().Return(serverConfig),
@@ -112,7 +114,10 @@ var _ = t.Describe("Server", func() {
 				storeMock.EXPECT().
 					FromContainerDirectory(gomock.Any(), gomock.Any()).
 					Return([]byte{}, nil),
+				cniPluginMock.EXPECT().GC(gomock.Any(), gomock.Len(0)).
+					Return(nil),
 			)
+			Expect(serverConfig.SetCNIPlugin(cniPluginMock)).To(Succeed())
 
 			// When
 			server, err := server.New(context.Background(), libMock)

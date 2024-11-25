@@ -1,18 +1,19 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"time"
+
+	json "github.com/json-iterator/go"
+	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/cri-o/cri-o/internal/log"
 	oci "github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/storage"
-	json "github.com/json-iterator/go"
-	spec "github.com/opencontainers/runtime-spec/specs-go"
-	"golang.org/x/net/context"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 const (
@@ -34,8 +35,8 @@ func (s *Server) ContainerStatus(ctx context.Context, req *types.ContainerStatus
 	containerID := c.ID()
 	imageRef := c.CRIContainer().ImageRef
 	imageNameInSpec := ""
-	if imageName := c.ImageName(); imageName != nil {
-		imageNameInSpec = imageName.StringForOutOfProcessConsumptionOnly()
+	if someNameOfTheImage := c.SomeNameOfTheImage(); someNameOfTheImage != nil {
+		imageNameInSpec = someNameOfTheImage.StringForOutOfProcessConsumptionOnly()
 	}
 	imageID := ""
 	if c.ImageID() != nil {
@@ -52,6 +53,7 @@ func (s *Server) ContainerStatus(ctx context.Context, req *types.ContainerStatus
 			Image: &types.ImageSpec{
 				Image: imageNameInSpec,
 			},
+			User: c.RuntimeUser(),
 		},
 	}
 
@@ -64,6 +66,7 @@ func (s *Server) ContainerStatus(ctx context.Context, req *types.ContainerStatus
 			RecursiveReadOnly: cv.RecursiveReadOnly,
 			Propagation:       cv.Propagation,
 			SelinuxRelabel:    cv.SelinuxRelabel,
+			Image:             cv.Image,
 		})
 	}
 	resp.Status.Mounts = mounts

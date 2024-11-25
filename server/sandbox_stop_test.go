@@ -3,13 +3,13 @@ package server_test
 import (
 	"context"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("PodSandboxStatus", func() {
 	// Prepare the sut
 	BeforeEach(func() {

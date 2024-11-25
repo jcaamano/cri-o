@@ -8,18 +8,18 @@ import (
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	cnicurrent "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/cri-o/ocicni/pkg/ocicni"
+	"k8s.io/apimachinery/pkg/api/resource"
+	utilnet "k8s.io/utils/net"
+
 	"github.com/cri-o/cri-o/internal/hostport"
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/server/metrics"
-	"github.com/cri-o/ocicni/pkg/ocicni"
-	"k8s.io/apimachinery/pkg/api/resource"
-
-	utilnet "k8s.io/utils/net"
 )
 
 // networkStart sets up the sandbox's network and returns the pod IP on success
-// or an error
+// or an error.
 func (s *Server) networkStart(ctx context.Context, sb *sandbox.Sandbox) (podIPs []string, result cnitypes.Result, retErr error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -98,9 +98,8 @@ func (s *Server) networkStart(ctx context.Context, sb *sandbox.Sandbox) (podIPs 
 				Name:         sbName,
 				PortMappings: sbPortMappings,
 				IP:           ip,
-				HostNetwork:  false,
 			}
-			// nolint:gocritic // using a switch statement is not much different
+			//nolint:gocritic // using a switch statement is not much different
 			if utilnet.IsIPv6(ip) {
 				if foundIPv6 {
 					// we have already done the portmap for IPv6
@@ -115,7 +114,7 @@ func (s *Server) networkStart(ctx context.Context, sb *sandbox.Sandbox) (podIPs 
 				// found a new IPv4 address, do the portmap
 				foundIPv4 = true
 			}
-			err = s.hostportManager.Add(sbID, mapping, "")
+			err = s.hostportManager.Add(sbID, mapping)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to add hostport mapping for sandbox %s(%s): %w", sb.Name(), sb.ID(), err)
 			}
@@ -128,7 +127,7 @@ func (s *Server) networkStart(ctx context.Context, sb *sandbox.Sandbox) (podIPs 
 	return podIPs, result, err
 }
 
-// getSandboxIP retrieves the IP address for the sandbox
+// getSandboxIP retrieves the IP address for the sandbox.
 func (s *Server) getSandboxIPs(ctx context.Context, sb *sandbox.Sandbox) ([]string, error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -160,7 +159,7 @@ func (s *Server) getSandboxIPs(ctx context.Context, sb *sandbox.Sandbox) ([]stri
 }
 
 // networkStop cleans up and removes a pod's network.  It is best-effort and
-// must call the network plugin even if the network namespace is already gone
+// must call the network plugin even if the network namespace is already gone.
 func (s *Server) networkStop(ctx context.Context, sb *sandbox.Sandbox) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -174,7 +173,6 @@ func (s *Server) networkStop(ctx context.Context, sb *sandbox.Sandbox) error {
 	mapping := &hostport.PodPortMapping{
 		Name:         sb.Name(),
 		PortMappings: sb.PortMappings(),
-		HostNetwork:  false,
 	}
 	// portMapping removal does not need the IP address
 	if err := s.hostportManager.Remove(sb.ID(), mapping); err != nil {
@@ -246,4 +244,23 @@ func (s *Server) newPodNetwork(ctx context.Context, sb *sandbox.Sandbox) (ocicni
 			},
 		},
 	}, nil
+}
+
+// networkGC cleans up any resources concerned with stale pods (pods not
+// included in validPods).
+func (s *Server) networkGC(ctx context.Context, validPods []*sandbox.Sandbox) error {
+	_, span := log.StartSpan(ctx)
+	defer span.End()
+
+	return s.config.CNIPluginGC(ctx, func() ([]*ocicni.PodNetwork, error) {
+		validPodNetworks := make([]*ocicni.PodNetwork, len(validPods))
+		for i := range validPods {
+			podNetwork, err := s.newPodNetwork(ctx, validPods[i])
+			if err != nil {
+				return nil, err
+			}
+			validPodNetworks[i] = &podNetwork
+		}
+		return validPodNetworks, nil
+	})
 }

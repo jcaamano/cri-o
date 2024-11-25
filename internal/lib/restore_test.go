@@ -11,16 +11,17 @@ import (
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
 	criu "github.com/checkpoint-restore/go-criu/v7/utils"
 	"github.com/containers/storage/pkg/archive"
-	"github.com/cri-o/cri-o/internal/lib"
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/cri-o/cri-o/internal/storage"
-	"github.com/cri-o/cri-o/internal/storage/references"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
+	"go.uber.org/mock/gomock"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/lib"
+	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/cri-o/cri-o/internal/storage/references"
 )
 
 var _ = t.Describe("ContainerRestore", func() {
@@ -28,7 +29,7 @@ var _ = t.Describe("ContainerRestore", func() {
 	BeforeEach(func() {
 		beforeEach()
 		createDummyConfig()
-		mockRuncInLibConfigCheckpoint()
+		mockRuntimeInLibConfigCheckpoint()
 		if err := criu.CheckForCriu(criu.PodCriuVersion); err != nil {
 			Skip("Check CRIU: " + err.Error())
 		}
@@ -103,7 +104,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			// Then
 			Expect(err).To(HaveOccurred())
 			Expect(res).To(Equal(""))
-			Expect(err.Error()).To(Equal(`failed to restore container containerID: a complete checkpoint for this container cannot be found, cannot restore: stat checkpoint/inventory.img: no such file or directory`))
+			Expect(err.Error()).To(ContainSubstring(`failed to restore container containerID`))
 		})
 	})
 	t.Describe("ContainerRestore", func() {
@@ -227,7 +228,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			// Then
 			Expect(err).To(HaveOccurred())
 			Expect(res).To(Equal(""))
-			Expect(err.Error()).To(ContainSubstring(`failed to restore container containerID: failed to`))
+			Expect(err.Error()).To(ContainSubstring(`failed to restore container containerID`))
 		})
 	})
 	t.Describe("ContainerRestore from OCI images", func() {
@@ -325,7 +326,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			// Then
 			Expect(err).To(HaveOccurred())
 			Expect(res).To(Equal(""))
-			Expect(err.Error()).To(ContainSubstring(`failed to restore container containerID: failed to`))
+			Expect(err.Error()).To(ContainSubstring(`failed to restore container containerID`))
 		})
 	})
 })
@@ -349,7 +350,7 @@ func setupInfraContainerWithPid(pid int, bundle string) {
 		Pid: pid,
 	}
 	// eat error here because callers may send invalid pids to test against
-	_ = cstate.SetInitPid(pid) // nolint:errcheck
+	_ = cstate.SetInitPid(pid) //nolint:errcheck
 	testContainer.SetState(cstate)
 	testContainer.SetSpec(&specs.Spec{
 		Version:     "1.0.0",

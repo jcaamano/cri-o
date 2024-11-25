@@ -12,30 +12,29 @@ import (
 	"github.com/containers/common/pkg/hooks"
 	cstorage "github.com/containers/storage"
 	"github.com/containers/storage/pkg/ioutils"
+	cmount "github.com/containers/storage/pkg/mount"
 	"github.com/containers/storage/pkg/truncindex"
+	json "github.com/json-iterator/go"
+	rspec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/selinux/go-selinux/label"
+	"github.com/sirupsen/logrus"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
 	"github.com/cri-o/cri-o/internal/hostport"
+	"github.com/cri-o/cri-o/internal/lib/constants"
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
 	statsserver "github.com/cri-o/cri-o/internal/lib/stats"
 	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/memorystore"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/registrar"
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/internal/storage/references"
 	"github.com/cri-o/cri-o/pkg/annotations"
 	libconfig "github.com/cri-o/cri-o/pkg/config"
-	json "github.com/json-iterator/go"
-	rspec "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/opencontainers/selinux/go-selinux/label"
-	"github.com/sirupsen/logrus"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// ContainerManagerCRIO specifies an annotation value which indicates that the
-// container has been created by CRI-O. Usually used together with the key
-// `io.container.manager`.
-const ContainerManagerCRIO = "cri-o"
-
-// ContainerServer implements the ImageServer
+// ContainerServer implements the ImageServer.
 type ContainerServer struct {
 	runtime              *oci.Runtime
 	store                cstorage.Store
@@ -53,42 +52,42 @@ type ContainerServer struct {
 	config    *libconfig.Config
 }
 
-// Runtime returns the oci runtime for the ContainerServer
+// Runtime returns the oci runtime for the ContainerServer.
 func (c *ContainerServer) Runtime() *oci.Runtime {
 	return c.runtime
 }
 
-// Store returns the Store for the ContainerServer
+// Store returns the Store for the ContainerServer.
 func (c *ContainerServer) Store() cstorage.Store {
 	return c.store
 }
 
-// StorageImageServer returns the ImageServer for the ContainerServer
+// StorageImageServer returns the ImageServer for the ContainerServer.
 func (c *ContainerServer) StorageImageServer() storage.ImageServer {
 	return c.storageImageServer
 }
 
-// CtrIDIndex returns the TruncIndex for the ContainerServer
+// CtrIDIndex returns the TruncIndex for the ContainerServer.
 func (c *ContainerServer) CtrIDIndex() *truncindex.TruncIndex {
 	return c.ctrIDIndex
 }
 
-// PodIDIndex returns the index of pod IDs
+// PodIDIndex returns the index of pod IDs.
 func (c *ContainerServer) PodIDIndex() *truncindex.TruncIndex {
 	return c.podIDIndex
 }
 
-// Config gets the configuration for the ContainerServer
+// Config gets the configuration for the ContainerServer.
 func (c *ContainerServer) Config() *libconfig.Config {
 	return c.config
 }
 
-// StorageRuntimeServer gets the runtime server for the ContainerServer
+// StorageRuntimeServer gets the runtime server for the ContainerServer.
 func (c *ContainerServer) StorageRuntimeServer() storage.RuntimeServer {
 	return c.storageRuntimeServer
 }
 
-// New creates a new ContainerServer with options provided
+// New creates a new ContainerServer with options provided.
 func New(ctx context.Context, configIface libconfig.Iface) (*ContainerServer, error) {
 	if configIface == nil {
 		return nil, errors.New("provided config is nil")
@@ -104,20 +103,24 @@ func New(ctx context.Context, configIface libconfig.Iface) (*ContainerServer, er
 	}
 
 	if config.InternalRepair && ShutdownWasUnclean(config) {
-		checkOptions := cstorage.CheckEverything()
-		report, err := store.Check(checkOptions)
-		if err != nil {
-			err = HandleUncleanShutdown(config, store)
-			if err != nil {
-				return nil, err
+		graphRoot := store.GraphRoot()
+		log.Warnf(ctx, "Checking storage directory %s for errors because of unclean shutdown", graphRoot)
+
+		wipeStorage := false
+		report, err := store.Check(checkQuick())
+		if err == nil && CheckReportHasErrors(report) {
+			log.Warnf(ctx, "Attempting to repair storage directory %s because of unclean shutdown", graphRoot)
+			if errs := store.Repair(report, cstorage.RepairEverything()); len(errs) > 0 {
+				wipeStorage = true
 			}
+		} else if err != nil {
+			// Storage check has failed with irrecoverable errors.
+			wipeStorage = true
 		}
-		options := cstorage.RepairOptions{
-			RemoveContainers: true,
-		}
-		if errs := store.Repair(report, &options); len(errs) > 0 {
-			err = HandleUncleanShutdown(config, store)
-			if err != nil {
+		if wipeStorage {
+			log.Warnf(ctx, "Wiping storage directory %s because of unclean shutdown", graphRoot)
+			// This will fail if there are any containers currently running.
+			if err := RemoveStorageDirectory(config, store, false); err != nil {
 				return nil, err
 			}
 		}
@@ -152,9 +155,9 @@ func New(ctx context.Context, configIface libconfig.Iface) (*ContainerServer, er
 		Hooks:                newHooks,
 		stateLock:            &sync.Mutex{},
 		state: &containerServerState{
-			containers:      oci.NewMemoryStore(),
-			infraContainers: oci.NewMemoryStore(),
-			sandboxes:       sandbox.NewMemoryStore(),
+			containers:      memorystore.New[*oci.Container](),
+			infraContainers: memorystore.New[*oci.Container](),
+			sandboxes:       memorystore.New[*sandbox.Sandbox](),
 			processLevels:   make(map[string]int),
 		},
 		config: config,
@@ -163,7 +166,7 @@ func New(ctx context.Context, configIface libconfig.Iface) (*ContainerServer, er
 	return c, nil
 }
 
-// LoadSandbox loads a sandbox from the disk into the sandbox store
+// LoadSandbox loads a sandbox from the disk into the sandbox store.
 func (c *ContainerServer) LoadSandbox(ctx context.Context, id string) (sb *sandbox.Sandbox, retErr error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -294,7 +297,7 @@ func (c *ContainerServer) LoadSandbox(ctx context.Context, id string) (sb *sandb
 	}
 
 	if !wasSpoofed {
-		scontainer, err = oci.NewContainer(m.Annotations[annotations.ContainerID], cname, sandboxPath, m.Annotations[annotations.LogPath], labels, m.Annotations, kubeAnnotations, m.Annotations[annotations.Image], nil, nil, "", nil, id, false, false, false, sb.RuntimeHandler(), sandboxDir, created, m.Annotations["org.opencontainers.image.stopSignal"])
+		scontainer, err = oci.NewContainer(m.Annotations[annotations.ContainerID], cname, sandboxPath, m.Annotations[annotations.LogPath], labels, m.Annotations, kubeAnnotations, m.Annotations[annotations.UserRequestedImage], nil, nil, "", nil, id, false, false, false, sb.RuntimeHandler(), sandboxDir, created, m.Annotations["org.opencontainers.image.stopSignal"])
 		if err != nil {
 			return sb, err
 		}
@@ -304,14 +307,8 @@ func (c *ContainerServer) LoadSandbox(ctx context.Context, id string) (sb *sandb
 	scontainer.SetSpec(&m)
 	scontainer.SetMountPoint(m.Annotations[annotations.MountPoint])
 
-	if m.Annotations[annotations.Volumes] != "" {
-		containerVolumes := []oci.ContainerVolume{}
-		if err = json.Unmarshal([]byte(m.Annotations[annotations.Volumes]), &containerVolumes); err != nil {
-			return sb, fmt.Errorf("failed to unmarshal container volumes: %w", err)
-		}
-		for _, cv := range containerVolumes {
-			scontainer.AddVolume(cv)
-		}
+	if err := restoreVolumes(&m, scontainer); err != nil {
+		return sb, fmt.Errorf("restore volumes: %w", err)
 	}
 
 	if err := sb.SetInfraContainer(scontainer); err != nil {
@@ -375,7 +372,7 @@ func (c *ContainerServer) LoadSandbox(ctx context.Context, id string) (sb *sandb
 
 var ErrIsNonCrioContainer = errors.New("non CRI-O container")
 
-// LoadContainer loads a container from the disk into the container store
+// LoadContainer loads a container from the disk into the container store.
 func (c *ContainerServer) LoadContainer(ctx context.Context, id string) (retErr error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -389,7 +386,7 @@ func (c *ContainerServer) LoadContainer(ctx context.Context, id string) (retErr 
 	}
 
 	// Do not interact with containers of others
-	if manager, ok := m.Annotations[annotations.ContainerManager]; ok && manager != ContainerManagerCRIO {
+	if manager, ok := m.Annotations[annotations.ContainerManager]; ok && manager != constants.ContainerManagerCRIO {
 		return ErrIsNonCrioContainer
 	}
 
@@ -432,18 +429,18 @@ func (c *ContainerServer) LoadContainer(ctx context.Context, id string) (retErr 
 		return err
 	}
 
-	userRequestedImage, ok := m.Annotations[annotations.Image]
+	userRequestedImage, ok := m.Annotations[annotations.UserRequestedImage]
 	if !ok {
 		userRequestedImage = ""
 	}
 
-	var imgName *references.RegistryImageReference
-	if s, ok := m.Annotations[annotations.ImageName]; ok && s != "" {
+	var someNameOfTheImage *references.RegistryImageReference
+	if s, ok := m.Annotations[annotations.SomeNameOfTheImage]; ok && s != "" {
 		name, err := references.ParseRegistryImageReferenceFromOutOfProcessData(s)
 		if err != nil {
-			return fmt.Errorf("invalid %s annotation %q: %w", annotations.ImageName, s, err)
+			return fmt.Errorf("invalid %s annotation %q: %w", annotations.SomeNameOfTheImage, s, err)
 		}
-		imgName = &name
+		someNameOfTheImage = &name
 	}
 
 	var imageID *storage.StorageImageID
@@ -470,10 +467,15 @@ func (c *ContainerServer) LoadContainer(ctx context.Context, id string) (retErr 
 		return err
 	}
 
-	ctr, err := oci.NewContainer(id, name, containerPath, m.Annotations[annotations.LogPath], labels, m.Annotations, kubeAnnotations, userRequestedImage, imgName, imageID, "", &metadata, sb.ID(), tty, stdin, stdinOnce, sb.RuntimeHandler(), containerDir, created, m.Annotations["org.opencontainers.image.stopSignal"])
+	ctr, err := oci.NewContainer(id, name, containerPath, m.Annotations[annotations.LogPath], labels, m.Annotations, kubeAnnotations, userRequestedImage, someNameOfTheImage, imageID, "", &metadata, sb.ID(), tty, stdin, stdinOnce, sb.RuntimeHandler(), containerDir, created, m.Annotations["org.opencontainers.image.stopSignal"])
 	if err != nil {
 		return err
 	}
+
+	if err := restoreVolumes(&m, ctr); err != nil {
+		return fmt.Errorf("restore volumes: %w", err)
+	}
+
 	ctr.SetSpec(&m)
 	ctr.SetMountPoint(m.Annotations[annotations.MountPoint])
 	spp := m.Annotations[annotations.SeccompProfilePath]
@@ -497,12 +499,25 @@ func (c *ContainerServer) LoadContainer(ctx context.Context, id string) (retErr 
 	return c.ctrIDIndex.Add(id)
 }
 
+func restoreVolumes(m *rspec.Spec, ctr *oci.Container) error {
+	if m.Annotations[annotations.Volumes] != "" {
+		containerVolumes := []oci.ContainerVolume{}
+		if err := json.Unmarshal([]byte(m.Annotations[annotations.Volumes]), &containerVolumes); err != nil {
+			return fmt.Errorf("failed to unmarshal container volumes: %w", err)
+		}
+		for _, cv := range containerVolumes {
+			ctr.AddVolume(cv)
+		}
+	}
+	return nil
+}
+
 func isTrue(annotaton string) bool {
 	return annotaton == "true"
 }
 
 // ContainerStateToDisk writes the container's state information to a JSON file
-// on disk
+// on disk.
 func (c *ContainerServer) ContainerStateToDisk(ctx context.Context, ctr *oci.Container) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -519,7 +534,7 @@ func (c *ContainerServer) ContainerStateToDisk(ctx context.Context, ctr *oci.Con
 	return enc.Encode(ctr.State())
 }
 
-// ReserveContainerName holds a name for a container that is being created
+// ReserveContainerName holds a name for a container that is being created.
 func (c *ContainerServer) ReserveContainerName(id, name string) (string, error) {
 	if err := c.ctrNameIndex.Reserve(name, id); err != nil {
 		err = fmt.Errorf("error reserving ctr name %s for id %s: %w", name, id, err)
@@ -529,20 +544,20 @@ func (c *ContainerServer) ReserveContainerName(id, name string) (string, error) 
 	return name, nil
 }
 
-// ContainerIDForName gets the container ID given the container name from the ID Index
+// ContainerIDForName gets the container ID given the container name from the ID Index.
 func (c *ContainerServer) ContainerIDForName(name string) (string, error) {
 	return c.ctrNameIndex.Get(name)
 }
 
 // ReleaseContainerName releases a container name from the index so that it can
-// be used by other containers
+// be used by other containers.
 func (c *ContainerServer) ReleaseContainerName(ctx context.Context, name string) {
 	_, span := log.StartSpan(ctx)
 	defer span.End()
 	c.ctrNameIndex.Release(name)
 }
 
-// ReservePodName holds a name for a pod that is being created
+// ReservePodName holds a name for a pod that is being created.
 func (c *ContainerServer) ReservePodName(id, name string) (string, error) {
 	if err := c.podNameIndex.Reserve(name, id); err != nil {
 		err = fmt.Errorf("error reserving pod name %s for id %s: %w", name, id, err)
@@ -553,25 +568,25 @@ func (c *ContainerServer) ReservePodName(id, name string) (string, error) {
 }
 
 // ReleasePodName releases a pod name from the index so it can be used by other
-// pods
+// pods.
 func (c *ContainerServer) ReleasePodName(name string) {
 	c.podNameIndex.Release(name)
 }
 
-// PodIDForName gets the pod ID given the pod name from the ID Index
+// PodIDForName gets the pod ID given the pod name from the ID Index.
 func (c *ContainerServer) PodIDForName(name string) (string, error) {
 	return c.podNameIndex.Get(name)
 }
 
 // recoverLogError recovers a runtime panic and logs the returned error if
-// existing
+// existing.
 func recoverLogError() {
 	if err := recover(); err != nil {
 		logrus.Error(err)
 	}
 }
 
-// Shutdown attempts to shut down the server's storage cleanly
+// Shutdown attempts to shut down the server's storage cleanly.
 func (c *ContainerServer) Shutdown() error {
 	defer recoverLogError()
 	_, err := c.store.Shutdown(false)
@@ -583,14 +598,14 @@ func (c *ContainerServer) Shutdown() error {
 }
 
 type containerServerState struct {
-	containers      oci.ContainerStorer
-	infraContainers oci.ContainerStorer
-	sandboxes       sandbox.Storer
+	containers      memorystore.Storer[*oci.Container]
+	infraContainers memorystore.Storer[*oci.Container]
+	sandboxes       memorystore.Storer[*sandbox.Sandbox]
 	// processLevels The number of sandboxes using the same SELinux MCS level. Need to release MCS Level, when count reaches 0
 	processLevels map[string]int
 }
 
-// AddContainer adds a container to the container state store
+// AddContainer adds a container to the container state store.
 func (c *ContainerServer) AddContainer(ctx context.Context, ctr *oci.Container) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -602,29 +617,29 @@ func (c *ContainerServer) AddContainer(ctx context.Context, ctr *oci.Container) 
 	c.state.containers.Add(ctr.ID(), ctr)
 }
 
-// AddInfraContainer adds a container to the container state store
+// AddInfraContainer adds a container to the container state store.
 func (c *ContainerServer) AddInfraContainer(ctx context.Context, ctr *oci.Container) {
 	c.state.infraContainers.Add(ctr.ID(), ctr)
 }
 
-// GetContainer returns a container by its ID
+// GetContainer returns a container by its ID.
 func (c *ContainerServer) GetContainer(ctx context.Context, id string) *oci.Container {
 	return c.state.containers.Get(id)
 }
 
-// GetInfraContainer returns a container by its ID
+// GetInfraContainer returns a container by its ID.
 func (c *ContainerServer) GetInfraContainer(ctx context.Context, id string) *oci.Container {
 	_, span := log.StartSpan(ctx)
 	defer span.End()
 	return c.state.infraContainers.Get(id)
 }
 
-// HasContainer checks if a container exists in the state
+// HasContainer checks if a container exists in the state.
 func (c *ContainerServer) HasContainer(id string) bool {
 	return c.state.containers.Get(id) != nil
 }
 
-// RemoveContainer removes a container from the container state store
+// RemoveContainer removes a container from the container state store.
 func (c *ContainerServer) RemoveContainer(ctx context.Context, ctr *oci.Container) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -641,20 +656,20 @@ func (c *ContainerServer) RemoveContainer(ctx context.Context, ctr *oci.Containe
 	c.state.containers.Delete(ctr.ID())
 }
 
-// RemoveInfraContainer removes a container from the container state store
+// RemoveInfraContainer removes a container from the container state store.
 func (c *ContainerServer) RemoveInfraContainer(ctx context.Context, ctr *oci.Container) {
 	_, span := log.StartSpan(ctx)
 	defer span.End()
 	c.state.infraContainers.Delete(ctr.ID())
 }
 
-// listContainers returns a list of all containers stored by the server state
+// listContainers returns a list of all containers stored by the server state.
 func (c *ContainerServer) listContainers() []*oci.Container {
 	return c.state.containers.List()
 }
 
 // ListContainers returns a list of all containers stored by the server state
-// that match the given filter function
+// that match the given filter function.
 func (c *ContainerServer) ListContainers(filters ...func(*oci.Container) bool) ([]*oci.Container, error) {
 	containers := c.listContainers()
 	if len(filters) == 0 {
@@ -672,7 +687,7 @@ func (c *ContainerServer) ListContainers(filters ...func(*oci.Container) bool) (
 	return filteredContainers, nil
 }
 
-// AddSandbox adds a sandbox to the sandbox state store
+// AddSandbox adds a sandbox to the sandbox state store.
 func (c *ContainerServer) AddSandbox(ctx context.Context, sb *sandbox.Sandbox) error {
 	_, span := log.StartSpan(ctx)
 	defer span.End()
@@ -683,12 +698,12 @@ func (c *ContainerServer) AddSandbox(ctx context.Context, sb *sandbox.Sandbox) e
 	return c.addSandboxPlatform(sb)
 }
 
-// GetSandbox returns a sandbox by its ID
+// GetSandbox returns a sandbox by its ID.
 func (c *ContainerServer) GetSandbox(id string) *sandbox.Sandbox {
 	return c.state.sandboxes.Get(id)
 }
 
-// GetSandboxContainer returns a sandbox's infra container
+// GetSandboxContainer returns a sandbox's infra container.
 func (c *ContainerServer) GetSandboxContainer(id string) *oci.Container {
 	sb := c.state.sandboxes.Get(id)
 	if sb == nil {
@@ -697,12 +712,12 @@ func (c *ContainerServer) GetSandboxContainer(id string) *oci.Container {
 	return sb.InfraContainer()
 }
 
-// HasSandbox checks if a sandbox exists in the state
+// HasSandbox checks if a sandbox exists in the state.
 func (c *ContainerServer) HasSandbox(id string) bool {
 	return c.state.sandboxes.Get(id) != nil
 }
 
-// RemoveSandbox removes a sandbox from the state store
+// RemoveSandbox removes a sandbox from the state store.
 func (c *ContainerServer) RemoveSandbox(ctx context.Context, id string) error {
 	_, span := log.StartSpan(ctx)
 	defer span.End()
@@ -722,7 +737,7 @@ func (c *ContainerServer) RemoveSandbox(ctx context.Context, id string) error {
 	return nil
 }
 
-// ListSandboxes lists all sandboxes in the state store
+// ListSandboxes lists all sandboxes in the state store.
 func (c *ContainerServer) ListSandboxes() []*sandbox.Sandbox {
 	return c.state.sandboxes.List()
 }
@@ -794,20 +809,82 @@ func ShutdownWasUnclean(config *libconfig.Config) bool {
 	return true
 }
 
-func HandleUncleanShutdown(config *libconfig.Config, store cstorage.Store) error {
-	logrus.Infof("File %s not found. Wiping storage directory %s because of suspected dirty shutdown", config.CleanShutdownFile, store.GraphRoot())
-	// If we do not do this, we may leak other resources that are not directly in the graphroot.
-	// Erroring here should not be fatal though, it's a best effort cleanup
+func RemoveStorageDirectory(config *libconfig.Config, store cstorage.Store, force bool) error {
+	// If we do not do this, we may leak other resources that are not directly
+	// in the graphroot. Erroring here should not be fatal though, it's a best
+	// effort cleanup.
 	if err := store.Wipe(); err != nil {
-		logrus.Infof("Failed to wipe storage cleanly: %v", err)
+		logrus.Infof("Failed to wipe storage: %v", err)
 	}
-	// unmount storage or else we will fail with EBUSY
-	if _, err := store.Shutdown(false); err != nil {
-		return fmt.Errorf("failed to shutdown storage before wiping: %w", err)
+
+	// Unmount storage or else we will fail with -EBUSY.
+	if _, err := store.Shutdown(true); err != nil {
+		// CRI-O and Podman are often used together on the same node,
+		// so the storage directory is shared between the two.
+		//
+		// Since a container started by Podman can be running, we will
+		// try to detect this and return an error rather than proceed
+		// with a storage wipe.
+		//
+		// The storage directory removal can also be forced, which will
+		// then delete everything irregardless of whether there are any
+		// containers running at the moment.
+		if !force && errors.Is(err, cstorage.ErrLayerUsedByContainer) {
+			return fmt.Errorf("failed to shutdown storage: %w", err)
+		}
+		logrus.Warnf("Failed to shutdown storage: %v", err)
+
+		// At this point, storage is most likely corrupted
+		// beyond repair, as such, remove any potentially
+		// orphaned mounts that might still be there, and
+		// prepare to completely remove the storage directory.
+		if err := cmount.RecursiveUnmount(store.GraphRoot()); err != nil {
+			logrus.Warnf("Failed to unmount storage: %v", err)
+		}
 	}
-	// totally remove storage, whatever is left (possibly orphaned layers)
+
+	// Completely remove storage, whatever is left (possibly orphaned layers).
 	if err := os.RemoveAll(store.GraphRoot()); err != nil {
 		return fmt.Errorf("failed to remove storage directory: %w", err)
 	}
 	return nil
+}
+
+// checkQuick returns custom storage check options with only checks known not to be
+// resource-intensive enabled. Where known I/O and CPU-bound checks, such as the
+// integrity and contents checks, are disabled.
+func checkQuick() *cstorage.CheckOptions {
+	// An alternative to `storage.CheckEverything()` and `storage.CheckMost()`
+	// helper functions that turn off the expensive layers integrity verification,
+	// which relies on calculating checksum for the content of the image. This is
+	// both I/O and CPU intensive and, depending on the size of images, number of
+	// layers, and number of files within each layer, can significantly impact the
+	// node performance while the check is running. Additionally, turn off the
+	// content check, which is also considered expensive.
+	//
+	// When the check runs, it can hold up CRI-O, eventually resulting in the node
+	// being marked as "NotReady" by the kubelet, which is undesirable.
+	//
+	// Turning off the integrity check has the side effect of preventing CRI-O from
+	// detecting whether a file is missing from the image or its content has changed.
+	return &cstorage.CheckOptions{
+		LayerDigests:   false, // Disabled for being I/O and CPU intensive.
+		LayerMountable: true,
+		LayerContents:  false, // Also disabled by `storage.CheckMost()`.
+		LayerData:      true,
+		ImageData:      true,
+		ContainerData:  true,
+	}
+}
+
+// CheckReportHasErrors checks if the report from a completed storage check includes
+// any recoverable errors that storage repair could fix.
+func CheckReportHasErrors(report cstorage.CheckReport) bool {
+	// The `storage.Check()` returns a report object and an error,
+	// where errors are most likely irrecoverable and should be
+	// handled as such; the report, on the contrary, can contain
+	// errors that the `storage.Repair()` could potentially fix.
+	return len(report.Layers) > 0 || len(report.ROLayers) > 0 ||
+		len(report.Images) > 0 || len(report.ROImages) > 0 ||
+		len(report.Containers) > 0
 }

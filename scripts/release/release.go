@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"os"
 
-	"sigs.k8s.io/release-utils/command"
-
-	"github.com/cri-o/cri-o/internal/version"
-	"github.com/cri-o/cri-o/scripts/utils"
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/release-sdk/git"
 	"sigs.k8s.io/release-sdk/github"
+	"sigs.k8s.io/release-utils/command"
 	"sigs.k8s.io/release-utils/env"
+
+	"github.com/cri-o/cri-o/internal/version"
+	"github.com/cri-o/cri-o/scripts/utils"
 )
 
 func main() {
@@ -79,9 +79,13 @@ func updateVersionAndCreatePR(
 	}
 
 	if doesTheBranchExistRemotely {
-		// Only Rebase and force push
-		rebaseBranch := "origin/" + newBranch
-		if err := repo.Rebase(rebaseBranch); err != nil {
+		// Only rebase and force push
+		logrus.Infof("Switching to existing branch: %s", newBranch)
+		if err := repo.Checkout(newBranch); err != nil {
+			return fmt.Errorf("unable to checkout existing branch %q: %w", newBranch, err)
+		}
+
+		if err := repo.Rebase("origin/" + baseBranchName); err != nil {
 			return fmt.Errorf("unable to rebase branch %q: %w", newBranch, err)
 		}
 
@@ -90,7 +94,8 @@ func updateVersionAndCreatePR(
 		}
 		return nil
 	}
-	logrus.Infof("Switching to branch: %s", newBranch)
+
+	logrus.Infof("Switching to new branch: %s", newBranch)
 	if err := repo.Checkout("-B", newBranch); err != nil {
 		return fmt.Errorf("unable to checkout branch %q: %w", newBranch, err)
 	}

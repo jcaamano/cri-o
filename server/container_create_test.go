@@ -9,7 +9,7 @@ import (
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ContainerCreate", func() {
 	// Prepare the sut
 	BeforeEach(func() {
@@ -124,8 +124,8 @@ var _ = t.Describe("ContainerCreate", func() {
 		})
 
 		It("should fail when container is stopped", func() {
-			ctx := context.TODO()
 			// Given
+			ctx := context.TODO()
 			addContainerAndSandbox()
 			testSandbox.SetStopped(ctx, false)
 
@@ -143,8 +143,8 @@ var _ = t.Describe("ContainerCreate", func() {
 		})
 
 		It("should fail when container checkpoint archive is empty", func() {
-			ctx := context.TODO()
 			// Given
+			ctx := context.TODO()
 			addContainerAndSandbox()
 			testSandbox.SetStopped(ctx, false)
 

@@ -12,18 +12,20 @@ import (
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/mount"
 	"github.com/containers/storage/pkg/stringid"
-	"github.com/cri-o/cri-o/internal/factory/container"
-	"github.com/cri-o/cri-o/internal/lib/sandbox"
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/internal/resourcestore"
-	"github.com/cri-o/cri-o/internal/storage"
-	"github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/utils"
 	securejoin "github.com/cyphar/filepath-securejoin"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/factory/container"
+	"github.com/cri-o/cri-o/internal/lib/sandbox"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/cri-o/cri-o/internal/resourcestore"
+	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/utils"
 )
 
 // sync with https://github.com/containers/storage/blob/7fe03f6c765f2adbc75a5691a1fb4f19e56e7071/pkg/truncindex/truncindex.go#L92
@@ -43,7 +45,7 @@ func (m orderedMounts) Less(i, j int) bool {
 	return m.parts(i) < m.parts(j)
 }
 
-// Swap swaps two items in an array of mounts. Used in sorting
+// Swap swaps two items in an array of mounts. Used in sorting.
 func (m orderedMounts) Swap(i, j int) {
 	m[i], m[j] = m[j], m[i]
 }
@@ -71,7 +73,7 @@ func (m criOrderedMounts) Less(i, j int) bool {
 	return m.parts(i) < m.parts(j)
 }
 
-// Swap swaps two items in an array of mounts. Used in sorting
+// Swap swaps two items in an array of mounts. Used in sorting.
 func (m criOrderedMounts) Swap(i, j int) {
 	m[i], m[j] = m[j], m[i]
 }
@@ -186,7 +188,7 @@ func resolveSymbolicLink(scope, path string) (string, error) {
 	return securejoin.SecureJoin(scope, path)
 }
 
-// setupContainerUser sets the UID, GID and supplemental groups in OCI runtime config
+// setupContainerUser sets the UID, GID and supplemental groups in OCI runtime config.
 func setupContainerUser(ctx context.Context, specgen *generate.Generator, rootfs, mountLabel, ctrRunDir string, sc *types.LinuxContainerSecurityContext, imageConfig *v1.Image) error {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
@@ -229,11 +231,19 @@ func setupContainerUser(ctx context.Context, specgen *generate.Generator, rootfs
 	}
 
 	genPasswd := true
+	genGroup := true
 	for _, mount := range specgen.Config.Mounts {
-		if mount.Destination == "/etc" ||
-			mount.Destination == "/etc/" ||
-			mount.Destination == "/etc/passwd" {
+		switch mount.Destination {
+		case "/etc", "/etc/":
 			genPasswd = false
+			genGroup = false
+		case "/etc/passwd":
+			genPasswd = false
+		case "/etc/group":
+			genGroup = false
+		}
+
+		if !genPasswd && !genGroup {
 			break
 		}
 	}
@@ -257,6 +267,28 @@ func setupContainerUser(ctx context.Context, specgen *generate.Generator, rootfs
 			specgen.AddMount(mnt)
 		}
 	}
+	if genGroup {
+		if sc.RunAsGroup != nil {
+			gid = uint32(sc.RunAsGroup.Value)
+		}
+
+		// verify gid exists in containers /etc/group, else generate a group with the group entry
+		groupPath, err := utils.GenerateGroup(gid, rootfs, ctrRunDir)
+		if err != nil {
+			return err
+		}
+		if groupPath != "" {
+			if err := securityLabel(groupPath, mountLabel, false, false); err != nil {
+				return err
+			}
+			specgen.AddMount(rspec.Mount{
+				Type:        "bind",
+				Source:      groupPath,
+				Destination: "/etc/group",
+				Options:     []string{"rw", "bind", "nodev", "nosuid", "noexec"},
+			})
+		}
+	}
 
 	specgen.SetProcessUID(uid)
 	if sc.RunAsGroup != nil {
@@ -265,15 +297,28 @@ func setupContainerUser(ctx context.Context, specgen *generate.Generator, rootfs
 	specgen.SetProcessGID(gid)
 	specgen.AddProcessAdditionalGid(gid)
 
-	for _, group := range addGroups {
-		specgen.AddProcessAdditionalGid(group)
+	supplementalGroupsPolicy := sc.GetSupplementalGroupsPolicy()
+
+	switch supplementalGroupsPolicy {
+	case types.SupplementalGroupsPolicy_Merge:
+		// Add groups from /etc/passwd and SupplementalGroups defined
+		// in security context.
+		for _, group := range addGroups {
+			specgen.AddProcessAdditionalGid(group)
+		}
+		for _, group := range sc.SupplementalGroups {
+			specgen.AddProcessAdditionalGid(uint32(group))
+		}
+	case types.SupplementalGroupsPolicy_Strict:
+		// Don't merge group defined in /etc/passwd.
+		for _, group := range sc.SupplementalGroups {
+			specgen.AddProcessAdditionalGid(uint32(group))
+		}
+
+	default:
+		return fmt.Errorf("not implemented in this CRI-O release: SupplementalGroupsPolicy=%v", supplementalGroupsPolicy)
 	}
 
-	// Add groups from CRI
-	groups := sc.SupplementalGroups
-	for _, group := range groups {
-		specgen.AddProcessAdditionalGid(uint32(group))
-	}
 	return nil
 }
 
@@ -296,7 +341,7 @@ func generateUserString(username, imageUser string, uid *types.Int64Value) strin
 	return userstr
 }
 
-// CreateContainer creates a new container in specified PodSandbox
+// CreateContainer creates a new container in specified PodSandbox.
 func (s *Server) CreateContainer(ctx context.Context, req *types.CreateContainerRequest) (res *types.CreateContainerResponse, retErr error) {
 	if req.Config == nil {
 		return nil, errors.New("config is nil")
@@ -311,7 +356,7 @@ func (s *Server) CreateContainer(ctx context.Context, req *types.CreateContainer
 		return nil, errors.New("sandbox config metadata is nil")
 	}
 
-	log.Infof(ctx, "Creating container: %s", translateLabelsToDescription(req.GetConfig().GetLabels()))
+	log.Infof(ctx, "Creating container: %s", oci.LabelsToDescription(req.GetConfig().GetLabels()))
 
 	// Check if image is a file. If it is a file it might be a checkpoint archive.
 	checkpointImage, err := func() (bool, error) {
@@ -340,13 +385,21 @@ func (s *Server) CreateContainer(ctx context.Context, req *types.CreateContainer
 		return nil, err
 	}
 
+	sb, err := s.getPodSandboxFromRequest(ctx, req.PodSandboxId)
+	if err != nil {
+		if errors.Is(err, sandbox.ErrIDEmpty) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("specified sandbox not found: %s: %w", req.PodSandboxId, err)
+	}
+
 	if checkpointImage {
 		// This might be a checkpoint image. Let's pass
 		// it to the checkpoint code.
 		ctrID, err := s.CRImportCheckpoint(
 			ctx,
 			req.Config,
-			req.PodSandboxId,
+			sb,
 			req.SandboxConfig.Metadata.Uid,
 		)
 		if err != nil {
@@ -357,14 +410,6 @@ func (s *Server) CreateContainer(ctx context.Context, req *types.CreateContainer
 		return &types.CreateContainerResponse{
 			ContainerId: ctrID,
 		}, nil
-	}
-
-	sb, err := s.getPodSandboxFromRequest(ctx, req.PodSandboxId)
-	if err != nil {
-		if errors.Is(err, sandbox.ErrIDEmpty) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("specified sandbox not found: %s: %w", req.PodSandboxId, err)
 	}
 
 	stopMutex := sb.StopMutex()

@@ -2,6 +2,7 @@ package oci
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -17,33 +18,33 @@ import (
 
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
 	criu "github.com/checkpoint-restore/go-criu/v7/utils"
+	"github.com/containers/common/pkg/crutils"
 	conmonconfig "github.com/containers/conmon/runner/config"
-	"github.com/containers/podman/v5/pkg/checkpoint/crutils"
 	"github.com/containers/storage/pkg/pools"
-	"github.com/cri-o/cri-o/internal/config/cgmgr"
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/server/metrics"
-	"github.com/cri-o/cri-o/utils"
-	"github.com/cri-o/cri-o/utils/cmdrunner"
 	"github.com/fsnotify/fsnotify"
 	json "github.com/json-iterator/go"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 	"golang.org/x/sys/unix"
 	kwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/remotecommand"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 	kclock "k8s.io/utils/clock"
 	utilexec "k8s.io/utils/exec"
+
+	"github.com/cri-o/cri-o/internal/config/cgmgr"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/server/metrics"
+	"github.com/cri-o/cri-o/utils"
+	"github.com/cri-o/cri-o/utils/cmdrunner"
 )
 
 const (
 	// RuntimeTypeOCI is the type representing the RuntimeOCI implementation.
 	RuntimeTypeOCI = "oci"
 
-	// Command line flag used to specify the run root directory
+	// Command line flag used to specify the run root directory.
 	rootFlag = "--root"
 
 	// Configuration for the stop loop exponential backoff manager.
@@ -74,7 +75,7 @@ type runtimeOCI struct {
 	handler *config.RuntimeHandler
 }
 
-// newRuntimeOCI creates a new runtimeOCI instance
+// newRuntimeOCI creates a new runtimeOCI instance.
 func newRuntimeOCI(r *Runtime, handler *config.RuntimeHandler) RuntimeImpl {
 	runRoot := config.DefaultRuntimeRoot
 	if handler.RuntimeRoot != "" {
@@ -88,13 +89,13 @@ func newRuntimeOCI(r *Runtime, handler *config.RuntimeHandler) RuntimeImpl {
 	}
 }
 
-// syncInfo is used to return data from monitor process to daemon
+// syncInfo is used to return data from monitor process to daemon.
 type syncInfo struct {
 	Pid     int    `json:"pid"`
 	Message string `json:"message,omitempty"`
 }
 
-// exitCodeInfo is used to return the monitored process exit code to the daemon
+// exitCodeInfo is used to return the monitored process exit code to the daemon.
 type exitCodeInfo struct {
 	ExitCode int32  `json:"exit_code"`
 	Message  string `json:"message,omitempty"`
@@ -144,6 +145,9 @@ func (r *runtimeOCI) CreateContainer(ctx context.Context, c *Container, cgroupPa
 	if r.config.LogSizeMax >= 0 {
 		args = append(args, "--log-size-max", strconv.FormatInt(r.config.LogSizeMax, 10))
 	}
+	if r.handler.NoSyncLog {
+		args = append(args, "--no-sync-log")
+	}
 	if r.config.LogToJournald {
 		args = append(args, "--log-path", "journald:")
 	}
@@ -181,7 +185,7 @@ func (r *runtimeOCI) CreateContainer(ctx context.Context, c *Container, cgroupPa
 		"args": args,
 	}).Debugf("running conmon: %s", r.handler.MonitorPath)
 
-	cmd := cmdrunner.Command(r.handler.MonitorPath, args...) // nolint: gosec
+	cmd := cmdrunner.Command(r.handler.MonitorPath, args...) //nolint: gosec
 	cmd.Dir = c.bundlePath
 	cmd.SysProcAttr = sysProcAttrPlatform()
 	cmd.Stdin = os.Stdin
@@ -423,7 +427,7 @@ func (r *runtimeOCI) ExecContainer(ctx context.Context, c *Container, cmd []stri
 
 	args := r.defaultRuntimeArgs()
 	args = append(args, "exec", "--process", processFile, c.ID())
-	execCmd := cmdrunner.CommandContext(ctx, c.RuntimePathForPlatform(r), args...) // nolint: gosec
+	execCmd := cmdrunner.CommandContext(ctx, c.RuntimePathForPlatform(r), args...) //nolint: gosec
 	if v, found := os.LookupEnv("XDG_RUNTIME_DIR"); found {
 		execCmd.Env = append(execCmd.Env, "XDG_RUNTIME_DIR="+v)
 	}
@@ -586,10 +590,10 @@ func (r *runtimeOCI) ExecSyncContainer(ctx context.Context, c *Container, comman
 
 	var cmd *exec.Cmd
 
-	if r.handler.MonitorExecCgroup == config.MonitorExecCgroupDefault || r.config.InfraCtrCPUSet == "" { // nolint: gocritic
-		cmd = cmdrunner.Command(r.handler.MonitorPath, args...) // nolint: gosec
+	if r.handler.MonitorExecCgroup == config.MonitorExecCgroupDefault || r.config.InfraCtrCPUSet == "" { //nolint: gocritic
+		cmd = cmdrunner.Command(r.handler.MonitorPath, args...) //nolint: gosec
 	} else if r.handler.MonitorExecCgroup == config.MonitorExecCgroupContainer {
-		cmd = exec.Command(r.handler.MonitorPath, args...) // nolint: gosec
+		cmd = exec.Command(r.handler.MonitorPath, args...) //nolint: gosec
 	} else {
 		msg := "Unsupported monitor_exec_cgroup value: " + r.handler.MonitorExecCgroup
 		return &types.ExecSyncResponse{
@@ -787,7 +791,7 @@ func TruncateAndReadFile(ctx context.Context, path string, size int64) ([]byte, 
 	return os.ReadFile(path)
 }
 
-// UpdateContainer updates container resources
+// UpdateContainer updates container resources.
 func (r *runtimeOCI) UpdateContainer(ctx context.Context, c *Container, res *rspec.LinuxResources) error {
 	_, span := log.StartSpan(ctx)
 	defer span.End()
@@ -799,7 +803,7 @@ func (r *runtimeOCI) UpdateContainer(ctx context.Context, c *Container, res *rsp
 		return nil
 	}
 
-	cmd := cmdrunner.Command(c.RuntimePathForPlatform(r), rootFlag, r.root, "update", "--resources", "-", c.ID()) // nolint: gosec
+	cmd := cmdrunner.Command(c.RuntimePathForPlatform(r), rootFlag, r.root, "update", "--resources", "-", c.ID()) //nolint: gosec
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -828,13 +832,6 @@ func (r *runtimeOCI) StopContainer(ctx context.Context, c *Container, timeout in
 		c.state.Status = ContainerStateStopped
 		c.state.Finished = time.Now()
 		return nil
-	}
-
-	if err := c.ShouldBeStopped(); err != nil {
-		if errors.Is(err, ErrContainerStopped) {
-			err = nil
-		}
-		return err
 	}
 
 	// The initial container process either doesn't exist, or isn't ours.
@@ -874,6 +871,19 @@ func (r *runtimeOCI) StopLoopForContainer(c *Container, bm kwait.BackoffManager)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 
 	c.opLock.Lock()
+	defer func() {
+		// Kill the exec PIDs after the main container to avoid pod lifecycle regressions:
+		// Ref: https://github.com/kubernetes/kubernetes/issues/124743
+		c.KillExecPIDs()
+		c.state.Finished = time.Now()
+		c.opLock.Unlock()
+		c.SetAsDoneStopping()
+	}()
+	if c.state.Status == ContainerStatePaused {
+		if _, err := r.runtimeCmd("resume", c.ID()); err != nil {
+			log.Errorf(ctx, "Failed to unpause container %s: %v", c.Name(), err)
+		}
+	}
 
 	// Begin the actual kill.
 	if _, err := r.runtimeCmd("kill", c.ID(), c.GetStopSignal()); err != nil {
@@ -881,26 +891,31 @@ func (r *runtimeOCI) StopLoopForContainer(c *Container, bm kwait.BackoffManager)
 			// The initial container process either doesn't exist, or isn't ours.
 			// Set state accordingly.
 			c.state.Finished = time.Now()
-			c.opLock.Unlock()
-			c.SetAsDoneStopping()
 			return
 		}
 	}
 
 	done := make(chan struct{})
 	go func() {
+		statusCheckTicker := time.NewTicker(stopProcessWatchSleep)
+		defer statusCheckTicker.Stop()
 		for {
-			if err := c.Living(); err != nil {
-				// The initial container process either doesn't exist, or isn't ours.
-				if !errors.Is(err, ErrNotFound) {
-					log.Warnf(ctx, "Failed to find process for container %s: %v", c.ID(), err)
-				}
-				close(done)
+			select {
+			case <-ctx.Done():
 				return
+			case <-statusCheckTicker.C:
+				// Periodically check if the container is still running.
+				// This avoids busy-waiting and reduces resource usage while
+				// ensuring timely detection of container termination.
+				if err := c.Living(); err != nil {
+					// The initial container process either doesn't exist, or isn't ours.
+					if !errors.Is(err, ErrNotFound) {
+						log.Warnf(ctx, "Failed to find process for container %s: %v", c.ID(), err)
+					}
+					close(done)
+					return
+				}
 			}
-
-			// The PID is still active and belongs to the container, continue to wait.
-			time.Sleep(stopProcessWatchSleep)
 		}
 	}()
 
@@ -922,8 +937,7 @@ func (r *runtimeOCI) StopLoopForContainer(c *Container, bm kwait.BackoffManager)
 	// Do not start the stuck process reminder immediately.
 	blockedTimer.Stop()
 
-	// We cannot use ExponentialBackoff() here as its stop conditions are not flexible enough.
-	kwait.BackoffUntil(func() {
+	for {
 		select {
 		case newTimeout := <-c.stopTimeoutChan:
 			// If a new timeout comes in, interrupt the old one, and start a new one.
@@ -936,30 +950,33 @@ func (r *runtimeOCI) StopLoopForContainer(c *Container, bm kwait.BackoffManager)
 
 		case <-time.After(time.Until(targetTime)):
 			log.Warnf(ctx, "Stopping container %s with stop signal timed out. Killing...", c.ID())
-
-			if _, err := r.runtimeCmd("kill", c.ID(), "KILL"); err != nil {
-				log.Errorf(ctx, "Killing container %v failed: %v", c.ID(), err)
-			}
-
-			if err := c.Living(); err != nil {
-				stop()
-			}
-
-			// Reschedule the timer so that the periodic reminder can continue.
-			blockedTimer.Reset(stopProcessBlockedInterval)
+			goto killContainer
 
 		case <-done:
 			stop()
+			return
+		case <-ctx.Done():
+			return
 		}
+	}
+killContainer:
+	// We cannot use ExponentialBackoff() here as its stop conditions are not flexible enough.
+	kwait.BackoffUntil(func() {
+		if _, err := r.runtimeCmd("kill", c.ID(), "KILL"); err != nil {
+			if !errors.Is(err, ErrNotFound) {
+				log.Errorf(ctx, "Killing container %v failed: %v", c.ID(), err)
+			} else {
+				log.Debugf(ctx, "Error while killing container %s: %v", c.ID(), err)
+			}
+		}
+
+		if err := c.Living(); err != nil {
+			stop()
+			return
+		}
+		// Reschedule the timer so that the periodic reminder can continue.
+		blockedTimer.Reset(stopProcessBlockedInterval)
 	}, bm, true, ctx.Done())
-
-	// Kill the exec PIDs after the main container to avoid pod lifecycle regressions:
-	// Ref: https://github.com/kubernetes/kubernetes/issues/124743
-	c.KillExecPIDs()
-
-	c.state.Finished = time.Now()
-	c.opLock.Unlock()
-	c.SetAsDoneStopping()
 }
 
 // DeleteContainer deletes a container.
@@ -979,6 +996,9 @@ func (r *runtimeOCI) DeleteContainer(ctx context.Context, c *Container) error {
 	}
 
 	_, err := r.runtimeCmd("delete", "--force", c.ID())
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
 	return err
 }
 
@@ -1327,7 +1347,7 @@ func (r *runtimeOCI) ReopenContainerLog(ctx context.Context, c *Container) error
 }
 
 // prepareProcessExec returns the path of the process.json used in runc exec -p
-// caller is responsible for removing the returned file, if prepareProcessExec succeeds
+// caller is responsible for removing the returned file, if prepareProcessExec succeeds.
 func prepareProcessExec(c *Container, cmd []string, tty bool) (processFile string, retErr error) {
 	f, err := os.CreateTemp("", "exec-process-")
 	if err != nil {
@@ -1364,7 +1384,7 @@ func prepareProcessExec(c *Container, cmd []string, tty bool) (processFile strin
 
 // ReadConmonPidFile attempts to read conmon's pid from its pid file
 // This function makes no verification that this file should exist
-// it is up to the caller to verify that this container has a conmon
+// it is up to the caller to verify that this container has a conmon.
 func ReadConmonPidFile(c *Container) (int, error) {
 	contents, err := os.ReadFile(c.conmonPidFilePath())
 	if err != nil {
@@ -1383,7 +1403,7 @@ func (c *Container) conmonPidFilePath() string {
 }
 
 // runtimeCmd executes a command with args and returns its output as a string along
-// with an error, if any
+// with an error, if any.
 func (r *runtimeOCI) runtimeCmd(args ...string) (string, error) {
 	runtimeArgs := append(r.defaultRuntimeArgs(), args...)
 	cmd := cmdrunner.Command(r.handler.RuntimePath, runtimeArgs...)
@@ -1397,6 +1417,18 @@ func (r *runtimeOCI) runtimeCmd(args ...string) (string, error) {
 
 	err := cmd.Run()
 	if err != nil {
+		stdErrStr := stderr.String()
+		switch {
+		// crun, for most of the commands.
+		case strings.Contains(stdErrStr, "no such process"):
+			fallthrough //nolint:gocritic
+		// runc, for most of the commands.
+		case strings.Contains(stdErrStr, "container not running"):
+			fallthrough //nolint:gocritic
+		// runc, on a rare occasion.
+		case strings.Contains(stdErrStr, "invalid process"):
+			err = ErrNotFound
+		}
 		return "", fmt.Errorf("`%v %v` failed: %v %v: %w", r.handler.RuntimePath, strings.Join(runtimeArgs, " "), stderr.String(), stdout.String(), err)
 	}
 

@@ -8,13 +8,14 @@ import (
 	"path/filepath"
 
 	"github.com/containers/storage"
-	"github.com/cri-o/cri-o/internal/lib/sandbox"
-
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/containers/storage/pkg/truncindex"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/lib/sandbox"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/oci"
 )
 
 // RemoveContainer removes the container. If the container is running, the container
@@ -26,6 +27,12 @@ func (s *Server) RemoveContainer(ctx context.Context, req *types.RemoveContainer
 	// save container description to print
 	c, err := s.GetContainerFromShortID(ctx, req.ContainerId)
 	if err != nil {
+		// The RemoveContainer RPC is idempotent, and must not return an error
+		// if the container has already been removed. Ref:
+		// https://github.com/kubernetes/cri-api/blob/c20fa40/pkg/apis/runtime/v1/api.proto#L74-L75
+		if errors.Is(err, truncindex.ErrNotExist) {
+			return &types.RemoveContainerResponse{}, nil
+		}
 		return nil, status.Errorf(codes.NotFound, "could not find container %q: %v", req.ContainerId, err)
 	}
 
@@ -46,7 +53,7 @@ func (s *Server) removeContainerInPod(ctx context.Context, sb *sandbox.Sandbox, 
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 	if !sb.Stopped() {
-		if err := s.stopContainer(ctx, c, int64(10)); err != nil {
+		if err := s.stopContainer(ctx, c, stopTimeoutFromContext(ctx)); err != nil {
 			return fmt.Errorf("failed to stop container for removal %w", err)
 		}
 	}

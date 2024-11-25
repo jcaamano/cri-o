@@ -13,17 +13,6 @@ import (
 	"time"
 
 	"github.com/containers/storage/pkg/stringid"
-	"github.com/cri-o/cri-o/internal/config/capabilities"
-	"github.com/cri-o/cri-o/internal/config/device"
-	"github.com/cri-o/cri-o/internal/config/nsmgr"
-	"github.com/cri-o/cri-o/internal/lib"
-	"github.com/cri-o/cri-o/internal/lib/sandbox"
-	"github.com/cri-o/cri-o/internal/log"
-	oci "github.com/cri-o/cri-o/internal/oci"
-	"github.com/cri-o/cri-o/internal/storage"
-	"github.com/cri-o/cri-o/pkg/annotations"
-	"github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/utils"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
@@ -33,9 +22,22 @@ import (
 	"github.com/syndtr/gocapability/capability"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 	kubeletTypes "k8s.io/kubelet/pkg/types"
+
+	"github.com/cri-o/cri-o/internal/config/capabilities"
+	"github.com/cri-o/cri-o/internal/config/cgmgr"
+	"github.com/cri-o/cri-o/internal/config/device"
+	"github.com/cri-o/cri-o/internal/config/node"
+	"github.com/cri-o/cri-o/internal/config/nsmgr"
+	"github.com/cri-o/cri-o/internal/lib/constants"
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/oci"
+	"github.com/cri-o/cri-o/internal/storage"
+	"github.com/cri-o/cri-o/pkg/annotations"
+	"github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/utils"
 )
 
-// Container is the main public container interface
+// Container is the main public container interface.
 type Container interface {
 	// All set methods are usually called in order of their definition
 
@@ -73,7 +75,8 @@ type Container interface {
 	// DisableFips returns whether the container should disable fips mode
 	DisableFips() bool
 
-	// UserRequestedImage returns the image specified in the container spec, or an error
+	// UserRequestedImage returns the image specified in the container spec and used to look up the image when creating the container, or an error.
+	// The value might evaluate to a different image (or to a different kind of reference!) at any future time.
 	UserRequestedImage() (string, error)
 
 	// ReadOnly returns whether the rootfs should be readonly
@@ -104,7 +107,7 @@ type Container interface {
 	SpecAddMount(rspec.Mount)
 
 	// SpecAddAnnotations adds annotations to the spec.
-	SpecAddAnnotations(ctx context.Context, sandbox *sandbox.Sandbox, containerVolume []oci.ContainerVolume, mountPoint, configStopSignal string, imageResult *storage.ImageResult, isSystemd bool, seccompRef, platformRuntimePath string) error
+	SpecAddAnnotations(ctx context.Context, sb SandboxIFace, containerVolume []oci.ContainerVolume, mountPoint, configStopSignal string, imageResult *storage.ImageResult, isSystemd bool, seccompRef, platformRuntimePath string) error
 
 	// SpecAddDevices adds devices from the server config, and container CRI config
 	SpecAddDevices([]device.Device, []device.Device, bool, bool) error
@@ -117,10 +120,16 @@ type Container interface {
 	SpecSetProcessArgs(imageOCIConfig *v1.Image) error
 
 	// SpecAddNamespaces sets the container's namespaces.
-	SpecAddNamespaces(*sandbox.Sandbox, *oci.Container, *config.Config) error
+	SpecAddNamespaces(SandboxIFace, *oci.Container, *config.Config) error
 
 	// SpecSetupCapabilities sets up the container's capabilities
 	SpecSetupCapabilities(*types.Capability, capabilities.Capabilities, bool) error
+
+	// SpecSetPrivileges sets the container's privileges
+	SpecSetPrivileges(ctx context.Context, securityContext *types.LinuxContainerSecurityContext, cfg *config.Config) error
+
+	// SpecSetLinuxContainerResources sets the container resources
+	SpecSetLinuxContainerResources(resources *types.LinuxContainerResources, containerMinMemory int64) error
 
 	// PidNamespace returns the pid namespace created by SpecAddNamespaces.
 	PidNamespace() nsmgr.Namespace
@@ -130,7 +139,7 @@ type Container interface {
 	WillRunSystemd() bool
 }
 
-// container is the hidden default type behind the Container interface
+// container is the hidden default type behind the Container interface.
 type container struct {
 	config     *types.ContainerConfig
 	sboxConfig *types.PodSandboxConfig
@@ -142,7 +151,7 @@ type container struct {
 	pidns      nsmgr.Namespace
 }
 
-// New creates a new, empty Sandbox instance
+// New creates a new, empty Sandbox instance.
 func New() (Container, error) {
 	// TODO: use image os
 	spec, err := generate.New(runtime.GOOS)
@@ -162,8 +171,8 @@ func (c *container) SpecAddMount(r rspec.Mount) {
 	c.spec.AddMount(r)
 }
 
-// SpecAddAnnotation adds all annotations to the spec
-func (c *container) SpecAddAnnotations(ctx context.Context, sb *sandbox.Sandbox, containerVolumes []oci.ContainerVolume, mountPoint, configStopSignal string, imageResult *storage.ImageResult, isSystemd bool, seccompRef, platformRuntimePath string) (err error) {
+// SpecAddAnnotation adds all annotations to the spec.
+func (c *container) SpecAddAnnotations(ctx context.Context, sb SandboxIFace, containerVolumes []oci.ContainerVolume, mountPoint, configStopSignal string, imageResult *storage.ImageResult, isSystemd bool, seccompRef, platformRuntimePath string) (err error) {
 	ctx, span := log.StartSpan(ctx)
 	defer span.End()
 	// Copied from k8s.io/kubernetes/pkg/kubelet/kuberuntime/labels.go
@@ -212,12 +221,12 @@ func (c *container) SpecAddAnnotations(ctx context.Context, sb *sandbox.Sandbox,
 		}
 	}
 
-	c.spec.AddAnnotation(annotations.Image, userRequestedImage)
-	imageName := ""
+	c.spec.AddAnnotation(annotations.UserRequestedImage, userRequestedImage)
+	someNameOfThisImage := ""
 	if imageResult.SomeNameOfThisImage != nil {
-		imageName = imageResult.SomeNameOfThisImage.StringForOutOfProcessConsumptionOnly()
+		someNameOfThisImage = imageResult.SomeNameOfThisImage.StringForOutOfProcessConsumptionOnly()
 	}
-	c.spec.AddAnnotation(annotations.ImageName, imageName)
+	c.spec.AddAnnotation(annotations.SomeNameOfTheImage, someNameOfThisImage)
 	c.spec.AddAnnotation(annotations.ImageRef, imageResult.ID.IDStringForOutOfProcessConsumptionOnly())
 	c.spec.AddAnnotation(annotations.Name, c.Name())
 	c.spec.AddAnnotation(annotations.ContainerID, c.ID())
@@ -229,7 +238,7 @@ func (c *container) SpecAddAnnotations(ctx context.Context, sb *sandbox.Sandbox,
 	c.spec.AddAnnotation(annotations.Stdin, strconv.FormatBool(c.Config().Stdin))
 	c.spec.AddAnnotation(annotations.StdinOnce, strconv.FormatBool(c.Config().StdinOnce))
 	c.spec.AddAnnotation(annotations.ResolvPath, sb.ResolvPath())
-	c.spec.AddAnnotation(annotations.ContainerManager, lib.ContainerManagerCRIO)
+	c.spec.AddAnnotation(annotations.ContainerManager, constants.ContainerManagerCRIO)
 	c.spec.AddAnnotation(annotations.MountPoint, mountPoint)
 	c.spec.AddAnnotation(annotations.SeccompProfilePath, seccompRef)
 	c.spec.AddAnnotation(annotations.Created, created.Format(time.RFC3339Nano))
@@ -292,7 +301,7 @@ func (c *container) Spec() *generate.Generator {
 	return &c.spec
 }
 
-// SetConfig sets the configuration to the container and validates it
+// SetConfig sets the configuration to the container and validates it.
 func (c *container) SetConfig(cfg *types.ContainerConfig, sboxConfig *types.PodSandboxConfig) error {
 	if c.config != nil {
 		return errors.New("config already set")
@@ -323,7 +332,7 @@ func (c *container) SetConfig(cfg *types.ContainerConfig, sboxConfig *types.PodS
 	return nil
 }
 
-// SetNameAndID sets a container name and ID
+// SetNameAndID sets a container name and ID.
 func (c *container) SetNameAndID(oldID string) error {
 	if c.config == nil {
 		return errors.New("config is not set")
@@ -357,38 +366,38 @@ func (c *container) SetNameAndID(oldID string) error {
 	return nil
 }
 
-// Config returns the container configuration
+// Config returns the container configuration.
 func (c *container) Config() *types.ContainerConfig {
 	return c.config
 }
 
-// SandboxConfig returns the sandbox configuration
+// SandboxConfig returns the sandbox configuration.
 func (c *container) SandboxConfig() *types.PodSandboxConfig {
 	return c.sboxConfig
 }
 
-// ID returns the container ID
+// ID returns the container ID.
 func (c *container) ID() string {
 	return c.id
 }
 
-// Name returns the container name
+// Name returns the container name.
 func (c *container) Name() string {
 	return c.name
 }
 
 // Restore returns if the container is marked as being
-// restored from a checkpoint
+// restored from a checkpoint.
 func (c *container) Restore() bool {
 	return c.restore
 }
 
-// SetRestore marks the container as being restored from a checkpoint
+// SetRestore marks the container as being restored from a checkpoint.
 func (c *container) SetRestore(restore bool) {
 	c.restore = restore
 }
 
-// SetPrivileged sets the privileged bool for the container
+// SetPrivileged sets the privileged bool for the container.
 func (c *container) SetPrivileged() error {
 	if c.config == nil {
 		return nil
@@ -421,14 +430,14 @@ func (c *container) SetPrivileged() error {
 	return nil
 }
 
-// Privileged returns whether this container is privileged
+// Privileged returns whether this container is privileged.
 func (c *container) Privileged() bool {
 	return c.privileged
 }
 
 // LogPath returns the log path for the container
 // It takes as input the LogDir of the sandbox, which is used
-// if there is no LogDir configured in the sandbox CRI config
+// if there is no LogDir configured in the sandbox CRI config.
 func (c *container) LogPath(sboxLogDir string) (string, error) {
 	sboxLogDirConfig := c.sboxConfig.LogDirectory
 	if sboxLogDirConfig != "" {
@@ -457,7 +466,7 @@ func (c *container) LogPath(sboxLogDir string) (string, error) {
 	return logPath, nil
 }
 
-// DisableFips returns whether the container should disable fips mode
+// DisableFips returns whether the container should disable fips mode.
 func (c *container) DisableFips() bool {
 	if value, ok := c.sboxConfig.Labels["FIPS_DISABLE"]; ok && value == "true" {
 		return true
@@ -465,7 +474,8 @@ func (c *container) DisableFips() bool {
 	return false
 }
 
-// UserRequestedImage returns the image specified in the container spec, or an error
+// UserRequestedImage returns the image specified in the container spec and used to look up the image when creating the container, or an error.
+// The value might evaluate to a different image (or to a different kind of reference!) at any future time.
 func (c *container) UserRequestedImage() (string, error) {
 	imageSpec := c.config.Image
 	if imageSpec == nil {
@@ -482,7 +492,7 @@ func (c *container) UserRequestedImage() (string, error) {
 // ReadOnly returns whether the rootfs should be readonly
 // it takes a bool as to whether crio was configured to
 // be readonly, which it defaults to if the container wasn't
-// specifically asked to be read only
+// specifically asked to be read only.
 func (c *container) ReadOnly(serverIsReadOnly bool) bool {
 	if c.config.Linux != nil && c.config.Linux.SecurityContext.ReadonlyRootfs {
 		return true
@@ -491,7 +501,7 @@ func (c *container) ReadOnly(serverIsReadOnly bool) bool {
 }
 
 // SelinuxLabel returns the container's SelinuxLabel
-// it takes the sandbox's label, which it falls back upon
+// it takes the sandbox's label, which it falls back upon.
 func (c *container) SelinuxLabel(sboxLabel string) ([]string, error) {
 	selinuxConfig := c.config.Linux.SecurityContext.SelinuxOptions
 
@@ -519,7 +529,7 @@ func (c *container) SelinuxLabel(sboxLabel string) ([]string, error) {
 	return ret, nil
 }
 
-// AddUnifiedResourcesFromAnnotations adds the cgroup-v2 resources specified in the io.kubernetes.cri-o.UnifiedCgroup annotation
+// AddUnifiedResourcesFromAnnotations adds the cgroup-v2 resources specified in the io.kubernetes.cri-o.UnifiedCgroup annotation.
 func (c *container) AddUnifiedResourcesFromAnnotations(annotationsMap map[string]string) error {
 	if c.config == nil || c.config.Labels == nil {
 		return nil
@@ -551,20 +561,18 @@ func (c *container) AddUnifiedResourcesFromAnnotations(annotationsMap map[string
 		}
 		d, err := b64.StdEncoding.DecodeString(parts[1])
 		// if the value is not specified in base64, then use its raw value.
-		v := ""
 		if err == nil {
-			v = string(d)
+			c.spec.Config.Linux.Resources.Unified[parts[0]] = string(d)
 		} else {
-			v = parts[1]
+			c.spec.Config.Linux.Resources.Unified[parts[0]] = parts[1]
 		}
-		c.spec.Config.Linux.Resources.Unified[parts[0]] = v
 	}
 
 	return nil
 }
 
 // SpecSetProcessArgs sets the process args in the spec,
-// given the image information and passed-in container config
+// given the image information and passed-in container config.
 func (c *container) SpecSetProcessArgs(imageOCIConfig *v1.Image) error {
 	kubeCommands := c.config.Command
 	kubeArgs := c.config.Args
@@ -757,4 +765,99 @@ func getOCICapabilitiesList() []string {
 		caps = append(caps, "CAP_"+strings.ToUpper(cap.String()))
 	}
 	return caps
+}
+
+func (c *container) SpecSetPrivileges(ctx context.Context, securityContext *types.LinuxContainerSecurityContext, cfg *config.Config) error {
+	specgen := c.Spec()
+	if c.Privileged() {
+		specgen.SetupPrivileged(true)
+	} else {
+		caps := securityContext.Capabilities
+		if err := c.SpecSetupCapabilities(caps, cfg.DefaultCapabilities, cfg.AddInheritableCapabilities); err != nil {
+			return err
+		}
+	}
+
+	if securityContext.NoNewPrivs {
+		const sysAdminCap = "CAP_SYS_ADMIN"
+		for _, cap := range specgen.Config.Process.Capabilities.Bounding {
+			if cap == sysAdminCap {
+				log.Warnf(ctx, "Setting `noNewPrivileges` flag has no effect because container has %s capability", sysAdminCap)
+			}
+		}
+
+		if c.Privileged() {
+			log.Warnf(ctx, "Setting `noNewPrivileges` flag has no effect because container is privileged")
+		}
+	}
+
+	specgen.SetProcessNoNewPrivileges(securityContext.NoNewPrivs)
+
+	if !c.Privileged() {
+		if securityContext.MaskedPaths != nil {
+			for _, path := range securityContext.MaskedPaths {
+				specgen.AddLinuxMaskedPaths(path)
+			}
+		}
+
+		if securityContext.ReadonlyPaths != nil {
+			for _, path := range securityContext.ReadonlyPaths {
+				specgen.AddLinuxReadonlyPaths(path)
+			}
+		}
+	}
+	return nil
+}
+
+func (c *container) SpecSetLinuxContainerResources(resources *types.LinuxContainerResources, containerMinMemory int64) error {
+	specgen := c.Spec()
+	specgen.SetLinuxResourcesCPUPeriod(uint64(resources.CpuPeriod))
+	specgen.SetLinuxResourcesCPUQuota(resources.CpuQuota)
+	specgen.SetLinuxResourcesCPUShares(uint64(resources.CpuShares))
+
+	memoryLimit := resources.MemoryLimitInBytes
+	if memoryLimit != 0 {
+		if err := cgmgr.VerifyMemoryIsEnough(memoryLimit, containerMinMemory); err != nil {
+			return err
+		}
+		specgen.SetLinuxResourcesMemoryLimit(memoryLimit)
+		if resources.MemorySwapLimitInBytes != 0 {
+			if resources.MemorySwapLimitInBytes > 0 && resources.MemorySwapLimitInBytes < resources.MemoryLimitInBytes {
+				return fmt.Errorf(
+					"container %s create failed because memory swap limit (%d) cannot be lower than memory limit (%d)",
+					c.ID(),
+					resources.MemorySwapLimitInBytes,
+					resources.MemoryLimitInBytes,
+				)
+			}
+			memoryLimit = resources.MemorySwapLimitInBytes
+		}
+		// If node doesn't have memory swap, then skip setting
+		// otherwise the container creation fails.
+		if node.CgroupHasMemorySwap() {
+			specgen.SetLinuxResourcesMemorySwap(memoryLimit)
+		}
+	}
+
+	specgen.SetProcessOOMScoreAdj(int(resources.OomScoreAdj))
+	specgen.SetLinuxResourcesCPUCpus(resources.CpusetCpus)
+	specgen.SetLinuxResourcesCPUMems(resources.CpusetMems)
+
+	// If the kernel has no support for hugetlb, silently ignore the limits
+	if node.CgroupHasHugetlb() {
+		hugepageLimits := resources.HugepageLimits
+		for _, limit := range hugepageLimits {
+			specgen.AddLinuxResourcesHugepageLimit(limit.PageSize, limit.Limit)
+		}
+	}
+
+	if node.CgroupIsV2() && len(resources.Unified) != 0 {
+		if specgen.Config.Linux.Resources.Unified == nil {
+			specgen.Config.Linux.Resources.Unified = make(map[string]string, len(resources.Unified))
+		}
+		for key, value := range resources.Unified {
+			specgen.Config.Linux.Resources.Unified[key] = value
+		}
+	}
+	return nil
 }

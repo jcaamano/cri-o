@@ -2,7 +2,7 @@
 
 function __fish_crio_no_subcommand --description 'Test if there has been any subcommand yet'
     for i in (commandline -opc)
-        if contains -- $i complete completion help h man markdown md config version wipe status config c containers container cs s info i help h
+        if contains -- $i check complete completion help h config man markdown md status config c containers container cs s info i goroutines g heap hp version wipe help h
             return 1
         end
     end
@@ -137,13 +137,13 @@ complete -c crio -n '__fish_crio_no_subcommand' -l pause-image-auth-file -r -d '
 complete -c crio -n '__fish_crio_no_subcommand' -f -l pids-limit -r -d 'Maximum number of processes allowed in a container. This option is deprecated. The Kubelet flag \'--pod-pids-limit\' should be used instead.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l pinned-images -r -d 'A list of images that will be excluded from the kubelet\'s garbage collection.'
 complete -c crio -n '__fish_crio_no_subcommand' -l pinns-path -r -d 'The path to find the pinns binary, which is needed to manage namespace lifecycle. Will be searched for in $PATH if empty.'
-complete -c crio -n '__fish_crio_no_subcommand' -f -l profile -d 'Enable pprof remote profiler on localhost:6060.'
+complete -c crio -n '__fish_crio_no_subcommand' -f -l profile -d 'Enable pprof remote profiler on 127.0.0.1:6060.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l profile-cpu -r -d 'Write a pprof CPU profile to the provided path.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l profile-mem -r -d 'Write a pprof memory profile to the provided path.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l profile-port -r -d 'Port for the pprof profiler.'
+complete -c crio -n '__fish_crio_no_subcommand' -f -l pull-progress-timeout -r -d 'The timeout for an image pull to make progress until the pull operation gets canceled. This value will be also used for calculating the pull progress interval to --pull-progress-timeout / 10. Can be set to 0 to disable the timeout as well as the progress output.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l rdt-config-file -r -d 'Path to the RDT configuration file for configuring the resctrl pseudo-filesystem.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l read-only -d 'Setup all unprivileged containers to run as read-only. Automatically mounts the containers\' tmpfs on \'/run\', \'/tmp\' and \'/var/tmp\'.'
-complete -c crio -n '__fish_crio_no_subcommand' -f -l registry -r -d 'Registry to be prepended when pulling unqualified images. Can be specified multiple times.'
 complete -c crio -n '__fish_crio_no_subcommand' -l root -s r -r -d 'The CRI-O root directory.'
 complete -c crio -n '__fish_crio_no_subcommand' -l runroot -r -d 'The CRI-O state directory.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l runtimes -r -d 'OCI runtimes, format is \'runtime_name:runtime_path:runtime_root:runtime_type:privileged_without_host_devices:runtime_config_path:container_min_memory\'.'
@@ -160,9 +160,9 @@ complete -c crio -n '__fish_crio_no_subcommand' -f -l stream-address -r -d 'Bind
 complete -c crio -n '__fish_crio_no_subcommand' -f -l stream-enable-tls -d 'Enable encrypted TLS transport of the stream server.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l stream-idle-timeout -r -d 'Length of time until open streams terminate due to lack of activity.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l stream-port -r -d 'Bind port for streaming socket. If the port is set to \'0\', then CRI-O will allocate a random free port number.'
-complete -c crio -n '__fish_crio_no_subcommand' -l stream-tls-ca -r -d 'Path to the x509 CA(s) file used to verify and authenticate client communication with the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.'
-complete -c crio -n '__fish_crio_no_subcommand' -l stream-tls-cert -r -d 'Path to the x509 certificate file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.'
-complete -c crio -n '__fish_crio_no_subcommand' -l stream-tls-key -r -d 'Path to the key file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.'
+complete -c crio -n '__fish_crio_no_subcommand' -l stream-tls-ca -r -d 'Path to the x509 CA(s) file used to verify and authenticate client communication with the encrypted stream. This file can change and CRI-O will automatically pick up the changes.'
+complete -c crio -n '__fish_crio_no_subcommand' -l stream-tls-cert -r -d 'Path to the x509 certificate file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes.'
+complete -c crio -n '__fish_crio_no_subcommand' -l stream-tls-key -r -d 'Path to the key file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l timezone -s tz -r -d 'To set the timezone for a container in CRI-O. If an empty string is provided, CRI-O retains its default behavior. Use \'Local\' to match the timezone of the host machine.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l tracing-endpoint -r -d 'Address on which the gRPC tracing collector will listen.'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l tracing-sampling-rate-per-million -r -d 'Number of samples to collect per million OpenTelemetry spans. Set to 1000000 to always sample.'
@@ -173,42 +173,45 @@ complete -c crio -n '__fish_crio_no_subcommand' -f -l help -s h -d 'show help'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l version -s v -d 'print the version'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l help -s h -d 'show help'
 complete -c crio -n '__fish_crio_no_subcommand' -f -l version -s v -d 'print the version'
+complete -c crio -n '__fish_seen_subcommand_from check' -f -l help -s h -d 'show help'
+complete -r -c crio -n '__fish_crio_no_subcommand' -a 'check' -d 'Check CRI-O storage directory for errors.
+
+This command can also repair damaged containers, images and layers.
+
+By default, the data integrity of the storage directory is verified,
+which can be an I/O and CPU-intensive operation. The --quick option
+can be used to reduce the number of checks run.
+
+When using the --repair option, especially with the --force option,
+CRI-O and any currently running containers should be stopped if
+possible to ensure no concurrent access to the storage directory
+occurs.
+
+The --wipe option can be used to automatically attempt to remove
+containers and images on a repair failure. This option, combined
+with the --force option, can be used to entirely remove the storage
+directory content in case of irrecoverable errors. This should be
+used as a last resort, and similarly to the --repair option, it\'s
+best if CRI-O and any currently running containers are stopped.'
+complete -c crio -n '__fish_seen_subcommand_from check' -f -l age -s a -r -d 'Maximum allowed age for unreferenced layers'
+complete -c crio -n '__fish_seen_subcommand_from check' -f -l force -s f -d 'Remove damaged containers'
+complete -c crio -n '__fish_seen_subcommand_from check' -f -l repair -s r -d 'Remove damaged images and layers'
+complete -c crio -n '__fish_seen_subcommand_from check' -f -l quick -s q -d 'Perform only quick checks'
+complete -c crio -n '__fish_seen_subcommand_from check' -f -l wipe -s w -d 'Wipe storage directory on repair failure'
 complete -c crio -n '__fish_seen_subcommand_from complete completion' -f -l help -s h -d 'show help'
 complete -r -c crio -n '__fish_crio_no_subcommand' -a 'complete completion' -d 'Generate bash, fish or zsh completions.'
 complete -c crio -n '__fish_seen_subcommand_from complete completion' -f -l help -s h -d 'show help'
 complete -c crio -n '__fish_seen_subcommand_from help h' -f -l help -s h -d 'show help'
 complete -r -c crio -n '__fish_seen_subcommand_from complete completion' -a 'help h' -d 'Shows a list of commands or help for one command'
-complete -c crio -n '__fish_seen_subcommand_from man' -f -l help -s h -d 'show help'
-complete -r -c crio -n '__fish_crio_no_subcommand' -a 'man' -d 'Generate the man page documentation.'
-complete -c crio -n '__fish_seen_subcommand_from markdown md' -f -l help -s h -d 'show help'
-complete -r -c crio -n '__fish_crio_no_subcommand' -a 'markdown md' -d 'Generate the markdown documentation.'
 complete -c crio -n '__fish_seen_subcommand_from config' -f -l help -s h -d 'show help'
 complete -r -c crio -n '__fish_crio_no_subcommand' -a 'config' -d 'Outputs a commented version of the configuration file that could be used
 by CRI-O. This allows you to save you current configuration setup and then load
 it later with **--config**. Global options will modify the output.'
 complete -c crio -n '__fish_seen_subcommand_from config' -f -l default -d 'Output the default configuration (without taking into account any configuration options).'
-complete -c crio -n '__fish_seen_subcommand_from config' -f -l migrate-defaults -s m -r -d 'Migrate the default config from a specified version.
-
-    The migrate-defaults command has been deprecated and will be removed in the future.
-
-    To run a config migration, just select the input config via the global
-    \'--config,-c\' command line argument, for example:
-    ```
-    crio -c /etc/crio/crio.conf.d/00-default.conf config -m 1.17
-    ```
-    The migration will print converted configuration options to stderr and will
-    output the resulting configuration to stdout.
-    Please note that the migration will overwrite any fields that have changed
-    defaults between versions. To save a custom configuration change, it should
-    be in a drop-in configuration file instead.
-    Possible values: "1.17"'
-complete -c crio -n '__fish_seen_subcommand_from version' -f -l help -s h -d 'show help'
-complete -r -c crio -n '__fish_crio_no_subcommand' -a 'version' -d 'display detailed version information'
-complete -c crio -n '__fish_seen_subcommand_from version' -f -l json -s j -d 'print JSON instead of text'
-complete -c crio -n '__fish_seen_subcommand_from version' -f -l verbose -s v -d 'print verbose information (for example all golang dependencies)'
-complete -c crio -n '__fish_seen_subcommand_from wipe' -f -l help -s h -d 'show help'
-complete -r -c crio -n '__fish_crio_no_subcommand' -a 'wipe' -d 'wipe CRI-O\'s container and image storage'
-complete -c crio -n '__fish_seen_subcommand_from wipe' -f -l force -s f -d 'force wipe by skipping the version check'
+complete -c crio -n '__fish_seen_subcommand_from man' -f -l help -s h -d 'show help'
+complete -r -c crio -n '__fish_crio_no_subcommand' -a 'man' -d 'Generate the man page documentation.'
+complete -c crio -n '__fish_seen_subcommand_from markdown md' -f -l help -s h -d 'show help'
+complete -r -c crio -n '__fish_crio_no_subcommand' -a 'markdown md' -d 'Generate the markdown documentation.'
 complete -c crio -n '__fish_seen_subcommand_from status' -f -l help -s h -d 'show help'
 complete -r -c crio -n '__fish_crio_no_subcommand' -a 'status' -d 'Display status information'
 complete -c crio -n '__fish_seen_subcommand_from status' -l socket -s s -r -d 'absolute path to the unix socket'
@@ -219,5 +222,17 @@ complete -r -c crio -n '__fish_seen_subcommand_from status' -a 'containers conta
 complete -c crio -n '__fish_seen_subcommand_from containers container cs s' -f -l id -s i -r -d 'the container ID'
 complete -c crio -n '__fish_seen_subcommand_from info i' -f -l help -s h -d 'show help'
 complete -r -c crio -n '__fish_seen_subcommand_from status' -a 'info i' -d 'Retrieve generic information about CRI-O, such as the cgroup and storage driver.'
+complete -c crio -n '__fish_seen_subcommand_from goroutines g' -f -l help -s h -d 'show help'
+complete -r -c crio -n '__fish_seen_subcommand_from status' -a 'goroutines g' -d 'Display the goroutine stack.'
+complete -c crio -n '__fish_seen_subcommand_from heap hp' -f -l help -s h -d 'show help'
+complete -r -c crio -n '__fish_seen_subcommand_from status' -a 'heap hp' -d 'Write the heap dump to a temp file and print its location on disk.'
+complete -c crio -n '__fish_seen_subcommand_from heap hp' -l file -s f -r -d 'Output file of the heap dump.'
+complete -c crio -n '__fish_seen_subcommand_from version' -f -l help -s h -d 'show help'
+complete -r -c crio -n '__fish_crio_no_subcommand' -a 'version' -d 'display detailed version information'
+complete -c crio -n '__fish_seen_subcommand_from version' -f -l json -s j -d 'print JSON instead of text'
+complete -c crio -n '__fish_seen_subcommand_from version' -f -l verbose -s v -d 'print verbose information (for example all golang dependencies)'
+complete -c crio -n '__fish_seen_subcommand_from wipe' -f -l help -s h -d 'show help'
+complete -r -c crio -n '__fish_crio_no_subcommand' -a 'wipe' -d 'wipe CRI-O\'s container and image storage'
+complete -c crio -n '__fish_seen_subcommand_from wipe' -f -l force -s f -d 'force wipe by skipping the version check'
 complete -c crio -n '__fish_seen_subcommand_from help h' -f -l help -s h -d 'show help'
 complete -r -c crio -n '__fish_crio_no_subcommand' -a 'help h' -d 'Shows a list of commands or help for one command'

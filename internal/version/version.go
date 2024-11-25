@@ -21,12 +21,12 @@ import (
 )
 
 // Version is the version of the build.
-const Version = "1.31.0"
+const Version = "1.32.0"
 
 // ReleaseMinorVersions are the currently supported minor versions.
-var ReleaseMinorVersions = []string{"1.30", "1.29", "1.28", "1.27"}
+var ReleaseMinorVersions = []string{"1.31", "1.30", "1.29"}
 
-// Variables injected during build-time
+// Variables injected during build-time.
 var (
 	buildDate string // build date in ISO8601 format, output of $(date -u +'%Y-%m-%dT%H:%M:%SZ')
 )
@@ -57,7 +57,7 @@ func ShouldCrioWipe(versionFileName string) (bool, error) {
 	return shouldCrioWipe(versionFileName, Version)
 }
 
-// shouldCrioWipe is an internal function for testing purposes
+// shouldCrioWipe is an internal function for testing purposes.
 func shouldCrioWipe(versionFileName, versionString string) (bool, error) {
 	if versionFileName == "" {
 		return false, nil
@@ -88,17 +88,17 @@ func shouldCrioWipe(versionFileName, versionString string) (bool, error) {
 // WriteVersionFile writes the version information to a given file is the
 // location of the old version file gitCommit is the current git commit
 // version. It will be added to the file to aid in debugging, but will not be
-// used to compare versions
+// used to compare versions.
 func (i *Info) WriteVersionFile(file string) error {
 	return writeVersionFile(file, i.GitCommit, Version)
 }
 
-// LogVersion logs the version and git information of this build
+// LogVersion logs the version and git information of this build.
 func (i *Info) LogVersion() {
 	logrus.Infof("Starting CRI-O, version: %s, git: %v(%s)", Version, i.GitCommit, i.GitTreeState)
 }
 
-// writeVersionFile is an internal function for testing purposes
+// writeVersionFile is an internal function for testing purposes.
 func writeVersionFile(file, gitCommit, version string) error {
 	if file == "" {
 		return nil
@@ -127,7 +127,7 @@ func writeVersionFile(file, gitCommit, version string) error {
 // const structs. We will instead spend some runtime on CRI-O startup
 // Because the version string doesn't keep track of the git commit,
 // but it could be useful for debugging, we pass it in here
-// If our version constant is properly formatted, this should never error
+// If our version constant is properly formatted, this should never error.
 func parseVersionConstant(versionString, gitCommit string) (*semver.Version, error) {
 	v, err := semver.Make(versionString)
 	if err != nil {
@@ -205,7 +205,7 @@ func Get(verbose bool) (*Info, error) {
 	}, nil
 }
 
-// String returns the string representation of the version info
+// String returns the string representation of the version info.
 func (i *Info) String() string {
 	b := strings.Builder{}
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
@@ -217,6 +217,7 @@ func (i *Info) String() string {
 		value := v.FieldByName(field.Name)
 
 		valueString := ""
+		isMultiLineValue := false
 		switch field.Type.Kind() {
 		case reflect.Bool:
 			valueString = strconv.FormatBool(value.Bool())
@@ -227,13 +228,19 @@ func (i *Info) String() string {
 				const sep = "\n  "
 				valueString = sep + strings.Join(s, sep)
 			}
+			isMultiLineValue = true
 
 		case reflect.String:
 			valueString = value.String()
 		}
 
 		if strings.TrimSpace(valueString) != "" {
-			fmt.Fprintf(w, "%s:\t%s", field.Name, valueString)
+			fmt.Fprintf(w, "%s:", field.Name)
+			if isMultiLineValue {
+				fmt.Fprint(w, valueString)
+			} else {
+				fmt.Fprintf(w, "\t%s", valueString)
+			}
 			if i+1 < t.NumField() {
 				fmt.Fprintf(w, "\n")
 			}
@@ -244,7 +251,7 @@ func (i *Info) String() string {
 	return b.String()
 }
 
-// JSONString returns the JSON representation of the version info
+// JSONString returns the JSON representation of the version info.
 func (i *Info) JSONString() (string, error) {
 	b, err := json.MarshalIndent(i, "", "  ")
 	if err != nil {

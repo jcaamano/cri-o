@@ -84,7 +84,7 @@ function crio() {
 
 # Run crictl using the binary specified by $CRICTL_BINARY.
 function crictl() {
-    "$CRICTL_BINARY" -t 10m --config "$CRICTL_CONFIG_FILE" -r "unix://$CRIO_SOCKET" -i "unix://$CRIO_SOCKET" "$@"
+    "$CRICTL_BINARY" -t "$CRICTL_TIMEOUT" --config "$CRICTL_CONFIG_FILE" -r "unix://$CRIO_SOCKET" -i "unix://$CRIO_SOCKET" "$@"
 }
 
 # Run the runtime binary with the specified RUNTIME_ROOT
@@ -177,8 +177,6 @@ function setup_crio() {
         --irqbalance-config-restore-file "$IRQBALANCE_CONFIG_RESTORE_FILE" \
         --signature-policy "$SIGNATURE_POLICY" \
         --signature-policy-dir "$SIGNATURE_POLICY_DIR" \
-        --registry "quay.io" \
-        --registry "docker.io" \
         -r "$TESTDIR/crio" \
         --runroot "$TESTDIR/crio-run" \
         --cni-default-network "$CNI_DEFAULT_NETWORK" \
@@ -214,6 +212,7 @@ function check_images() {
     eval "$(jq -r '.images[] |
         select(.repoTags[0] == "quay.io/crio/fedora-crio-ci:latest") |
         "REDIS_IMAGEID=" + .id + "\n" +
+        "REDIS_IMAGEDIGEST=" + .repoDigests[0] + "\n" +
 	"REDIS_IMAGEREF=" + .repoDigests[0]' <<<"$json")"
 }
 
@@ -341,14 +340,6 @@ function restart_crio() {
     fi
 }
 
-function cleanup_lvm() {
-    if [ -n "${LVM_DEVICE+x}" ]; then
-        lvm lvremove -y storage/thinpool
-        lvm vgremove -y storage
-        lvm pvremove -y "$LVM_DEVICE"
-    fi
-}
-
 function cleanup_testdir() {
     # shellcheck disable=SC2013
     # Note: By using 'sort -r' we're ensuring longer paths go first, which
@@ -385,8 +376,12 @@ function cleanup_test() {
         cleanup_ctrs
         cleanup_pods
         stop_crio
-        cleanup_lvm
         cleanup_testdir
+        if [ "$RUNTIME_TYPE" == "vm" ]; then
+            # cleanup left over kata processes
+            # don't fail if there is none
+            run killall containerd-shim-kata-v2
+        fi
     else
         echo >&3 "* Failed \"$BATS_TEST_DESCRIPTION\", TESTDIR=$TESTDIR, LVM_DEVICE=${LVM_DEVICE:-}"
     fi
@@ -416,25 +411,32 @@ function is_selinux_enforcing() {
 
 function prepare_network_conf() {
     mkdir -p "$CRIO_CNI_CONFIG"
-    cat >"$CRIO_CNI_CONFIG/10-crio.conf" <<-EOF
+    cat >"$CRIO_CNI_CONFIG/10-crio.conflist" <<-EOF
 {
     "cniVersion": "0.3.1",
     "name": "$CNI_DEFAULT_NETWORK",
-    "type": "$CNI_TYPE",
-    "bridge": "cni0",
-    "isGateway": true,
-    "ipMasq": true,
-    "ipam": {
-        "type": "host-local",
-        "routes": [
-            { "dst": "$POD_IPV4_DEF_ROUTE" },
-            { "dst": "$POD_IPV6_DEF_ROUTE" }
-        ],
-        "ranges": [
-            [{ "subnet": "$POD_IPV4_CIDR" }],
-            [{ "subnet": "$POD_IPV6_CIDR" }]
-        ]
-    }
+    "disableGC": true,
+    "plugins": [
+        {
+            "cniVersion": "0.3.1",
+            "name": "$CNI_DEFAULT_NETWORK",
+            "type": "$CNI_TYPE",
+            "bridge": "cni0",
+            "isGateway": true,
+            "ipMasq": true,
+            "ipam": {
+                "type": "host-local",
+                "routes": [
+                    { "dst": "$POD_IPV4_DEF_ROUTE" },
+                    { "dst": "$POD_IPV6_DEF_ROUTE" }
+                ],
+                "ranges": [
+                    [{ "subnet": "$POD_IPV4_CIDR" }],
+                    [{ "subnet": "$POD_IPV6_CIDR" }]
+                ]
+            }
+        }
+    ]
 }
 EOF
 }
@@ -491,7 +493,28 @@ function reload_crio() {
     kill -HUP "$CRIO_PID"
 }
 
+# wait_for_log <log message> [line to skip]
+#
+# Wait for a given log message in crio log file.
+#
+# If a second parameter is given, the log will be truncated from start to the
+# first occurrence of the second parameter. This allow to catch messages after
+# the given string.
+#
+# The function registers the timestamp of the first occurrence it finds to an
+# environment variable "LAST_TIMESTAMP".
+# This variable can then be used as the second parameter to the function, making
+# sure that we can find repetitions of the same log messages over time.
+#
+# $1 : log message to wait for
+# $2 : previous string that needs to be skipped
+#
 function wait_for_log() {
+    export LAST_TIMESTAMP
+    local LOGFILE="$CRIO_LOG"
+    if [ "$2" != "" ]; then
+        LOGFILE=$(mktemp "$TESTDIR"/wait_for_log_XXXXXX)
+    fi
     CNT=0
     while true; do
         if [[ $CNT -gt 50 ]]; then
@@ -499,7 +522,18 @@ function wait_for_log() {
             exit 1
         fi
 
-        if grep -iq "$1" "$CRIO_LOG"; then
+        if [ "$2" != "" ]; then
+            # create a temp log file containing only the logs after the given string
+            sed -e "1,/$2/d" <"$CRIO_LOG" >"$LOGFILE"
+        fi
+        status=0 # initialize the variable to make shellcheck happy
+        run grep -i -m 1 "$1" "$LOGFILE"
+        if [ "$status" -eq 0 ]; then
+            # register only the time part of the timestamp
+            # this should be a string with no space in it, and that is unique in the log
+            # NOTE: log time format = 2006-01-02T15:04:05.999999999Z
+            TIMESTAMP_REGEXP="[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}.[[:digit:]]{2}:[[:digit:]]{2}:[[:digit:]]{2}.[[:digit:]]*."
+            LAST_TIMESTAMP=$(echo "$output" | grep -oE "time=\"$TIMESTAMP_REGEXP" | cut -d" " -f2)
             break
         fi
 
@@ -522,6 +556,8 @@ function is_cgroup_v2() {
 function create_runtime_with_allowed_annotation() {
     local NAME="$1"
     local ANNOTATION="$2"
+    unset CONTAINER_DEFAULT_RUNTIME
+    unset CONTAINER_RUNTIMES
     cat <<EOF >"$CRIO_CONFIG_DIR/01-$NAME.conf"
 [crio.runtime]
 default_runtime = "$NAME"
@@ -743,4 +779,12 @@ function annotations_equal() {
     contains "$expected" "$cni_plugin_received"
     received_contains_expected=$?
     [[ $expected_contains_received -eq 0 ]] && [[ $received_contains_expected -eq 0 ]]
+}
+
+function remove_random_storage_layer() {
+    find "$TESTDIR"/crio/overlay -maxdepth 1 | grep '.*/[a-f0-9\-]\{64\}.*' | head -1 | xargs rm -Rf
+}
+
+function is_using_crun() {
+    runtime --version | grep -q crun
 }

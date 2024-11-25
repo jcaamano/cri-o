@@ -3,18 +3,20 @@ package lib
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
 	"github.com/checkpoint-restore/go-criu/v7/stats"
-	"github.com/containers/podman/v5/pkg/checkpoint/crutils"
+	"github.com/containers/common/pkg/crutils"
 	"github.com/containers/storage/pkg/archive"
+	"github.com/opencontainers/runtime-tools/generate"
+	"github.com/sirupsen/logrus"
+
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/pkg/annotations"
-	"github.com/opencontainers/runtime-tools/generate"
-	"github.com/sirupsen/logrus"
 )
 
 // ContainerRestore restores a checkpointed container.
@@ -87,6 +89,7 @@ func (c *ContainerServer) ContainerRestore(
 				metadata.PodDumpFile,
 				stats.StatsDump,
 				"bind.mounts",
+				annotations.LogPath,
 			}
 			for _, name := range checkpoint {
 				src := filepath.Join(imageMountPoint, name)
@@ -102,6 +105,25 @@ func (c *ContainerServer) ContainerRestore(
 		}
 		if err := c.restoreFileSystemChanges(ctr, mountPoint); err != nil {
 			return "", err
+		}
+
+		_, err = os.Stat(filepath.Join(ctr.Dir(), annotations.LogPath))
+		if err == nil {
+			src, err := os.Open(filepath.Join(ctr.Dir(), annotations.LogPath))
+			if err != nil {
+				return "", fmt.Errorf("error opening log file %q: %w", annotations.LogPath, err)
+			}
+			defer src.Close()
+			destLogPath := ctrSpec.Config.Annotations[annotations.LogPath]
+			destLog, err := os.Create(destLogPath)
+			if err != nil {
+				return "", fmt.Errorf("error opening log file %q: %w", destLogPath, err)
+			}
+			defer destLog.Close()
+			_, err = io.Copy(destLog, src)
+			if err != nil {
+				return "", fmt.Errorf("copying log file to %q failed: %w", destLogPath, err)
+			}
 		}
 
 		_, err = os.Stat(filepath.Join(ctr.Dir(), "bind.mounts"))

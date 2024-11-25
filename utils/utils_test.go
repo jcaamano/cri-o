@@ -5,12 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/containers/storage/pkg/unshare"
-	"github.com/cri-o/cri-o/internal/dbusmgr"
-	"github.com/cri-o/cri-o/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/cri-o/cri-o/internal/dbusmgr"
+	"github.com/cri-o/cri-o/utils"
 )
 
 type errorReaderWriter struct{}
@@ -23,7 +25,7 @@ func (m *errorReaderWriter) Read(p []byte) (int, error) {
 	return 0, t.TestError
 }
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Utils", func() {
 	t.Describe("StatusToExitCode", func() {
 		It("should succeed", func() {
@@ -178,6 +180,11 @@ var _ = t.Describe("Utils", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(passwdFile).To(BeEmpty())
 
+			// groupPath should be empty because an updated /etc/group file isn't created.
+			groupPath, err := utils.GenerateGroup(gid, dir, dir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(groupPath).To(BeEmpty())
+
 			// Double check that the uid, gid, and additional gids didn't change.
 			newuid, newgid, newaddgids, err := utils.GetUserInfo(dir, "root")
 			Expect(err).ToNot(HaveOccurred())
@@ -197,6 +204,11 @@ var _ = t.Describe("Utils", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(passwdFile).To(BeEmpty())
 
+			// groupPath should be empty because an updated /etc/group file isn't created.
+			groupPath, err := utils.GenerateGroup(gid, dir, dir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(groupPath).To(BeEmpty())
+
 			// Double check that the uid, gid, and additional gids didn't change.
 			newuid, newgid, newaddgids, err := utils.GetUserInfo(dir, "daemon")
 			Expect(err).ToNot(HaveOccurred())
@@ -215,6 +227,11 @@ var _ = t.Describe("Utils", func() {
 			passwdFile, err := utils.GeneratePasswd("", uid, gid, "", dir, dir)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(passwdFile).To(BeEmpty())
+
+			// groupPath should be empty because an updated /etc/group file isn't created.
+			groupPath, err := utils.GenerateGroup(gid, dir, dir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(groupPath).To(BeEmpty())
 
 			// Double check that the uid, gid, and additional gids didn't change.
 			newuid, newgid, newaddgids, err := utils.GetUserInfo(dir, "25")
@@ -241,6 +258,16 @@ var _ = t.Describe("Utils", func() {
 			Expect(newuid).To(Equal(uid))
 			Expect(newgid).To(Equal(gid))
 			Expect(newaddgids).To(Equal(addgids))
+		})
+
+		It("should succeed with gid that doesn't exist in /etc/group", func() {
+			dir := createEtcFiles()
+			defer os.RemoveAll(dir)
+
+			// groupPath should not be empty because an updated /etc/group file is created.
+			groupPath, err := utils.GenerateGroup(6000, dir, dir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(groupPath).ToNot(BeEmpty())
 		})
 
 		It("should fail with username that desn't exist in /etc/passwd", func() {
@@ -280,6 +307,11 @@ var _ = t.Describe("Utils", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(passwdFile).To(BeEmpty())
 
+			// groupPath should be empty because an updated /etc/group file isn't created.
+			groupPath, err := utils.GenerateGroup(gid, dir, dir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(groupPath).To(BeEmpty())
+
 			// Double check that the uid, gid, and additional gids didn't change.
 			newuid, newgid, newaddgids, err := utils.GetUserInfo(dir, "2:22")
 			Expect(err).ToNot(HaveOccurred())
@@ -298,6 +330,11 @@ var _ = t.Describe("Utils", func() {
 			passwdFile, err := utils.GeneratePasswd("", uid, gid, "", dir, dir)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(passwdFile).To(BeEmpty())
+
+			// groupPath should not be empty because an updated /etc/group file is created.
+			groupPath, err := utils.GenerateGroup(6000, dir, dir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(groupPath).ToNot(BeEmpty())
 
 			// Double check that the uid, gid, and additional gids didn't change.
 			newuid, newgid, newaddgids, err := utils.GetUserInfo(dir, "daemon:250")
@@ -318,6 +355,11 @@ var _ = t.Describe("Utils", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(passwdFile).ToNot(BeEmpty())
 
+			// groupPath should not be empty because an updated /etc/group file is created.
+			groupPath, err := utils.GenerateGroup(6000, dir, dir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(groupPath).ToNot(BeEmpty())
+
 			// Double check that the uid, gid, and additional gids didn't change.
 			newuid, newgid, newaddgids, err := utils.GetUserInfo(dir, "300:250")
 			Expect(err).ToNot(HaveOccurred())
@@ -337,6 +379,11 @@ var _ = t.Describe("Utils", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(passwdFile).ToNot(BeEmpty())
 
+			// groupPath should be empty because an updated /etc/group file isn't created.
+			groupPath, err := utils.GenerateGroup(gid, dir, dir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(groupPath).To(BeEmpty())
+
 			// Double check that the uid, gid, and additional gids didn't change.
 			newuid, newgid, newaddgids, err := utils.GetUserInfo(dir, "300:mail")
 			Expect(err).ToNot(HaveOccurred())
@@ -345,13 +392,105 @@ var _ = t.Describe("Utils", func() {
 			Expect(newaddgids).To(Equal(addgids))
 		})
 	})
+
+	t.Describe("ParseDuration", func() {
+		It("should succeed with duration value with unit", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("5s")
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(duration).To(Equal(5 * time.Second))
+		})
+
+		It("should succeed with duration value without unit", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("5")
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(duration).To(Equal(5 * time.Second))
+		})
+
+		It("should succeed with negative duration value with unit", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("-5s")
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(duration).To(Equal(5 * time.Second))
+		})
+
+		It("should succeed with negative duration value without unit", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("-5")
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(duration).To(Equal(5 * time.Second))
+		})
+
+		It("should succeed with zero as duration value without unit", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("0")
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(duration).To(Equal(time.Duration(0)))
+		})
+
+		It("should succeed with floating point duration with unit", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("1.234s")
+
+			// Then
+			Expect(err).ToNot(HaveOccurred())
+			Expect(duration).To(Equal(time.Duration(1.234 * float64(time.Second))))
+		})
+
+		It("should fail with invalid floating point duration without unit", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("1.234")
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(duration).To(Equal(time.Duration(0)))
+		})
+
+		It("should fail with invalid duration", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("test")
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(duration).To(Equal(time.Duration(0)))
+		})
+
+		It("should fail with empty duration", func() {
+			// Given
+			// When
+			duration, err := utils.ParseDuration("")
+
+			// Then
+			Expect(err).To(HaveOccurred())
+			Expect(duration).To(Equal(time.Duration(0)))
+		})
+	})
 })
 
 func createEtcFiles() string {
 	// Create an /etc/passwd and /etc/group file that match
 	// those of the alpine image
 	// This will be created in a temp directory like /tmp/uid-test*
-	// nolint: gosec
+	//nolint: gosec
 	alpinePasswdFile := `root:x:0:0:root:/root:/bin/ash
 bin:x:1:1:bin:/bin:/sbin/nologin
 daemon:x:2:2:daemon:/sbin:/sbin/nologin

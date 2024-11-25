@@ -12,16 +12,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Defaults if none are specified
+// Defaults if none are specified.
 const (
-	defaultRuntime       = "runc"
+	DefaultRuntime       = "crun"
 	DefaultRuntimeType   = "oci"
-	DefaultRuntimeRoot   = "/run/runc"
+	DefaultRuntimeRoot   = "/run/crun"
 	defaultMonitorCgroup = "system.slice"
-	// ImageVolumesBind option is for using bind mounted volumes
+	// ImageVolumesBind option is for using bind mounted volumes.
 	ImageVolumesBind ImageVolumesType = "bind"
-	// DefaultPauseImage is default pause image
-	DefaultPauseImage string = "registry.k8s.io/pause:3.9"
+	// DefaultPauseImage is default pause image.
+	DefaultPauseImage string = "registry.k8s.io/pause:3.10"
 )
 
 var (

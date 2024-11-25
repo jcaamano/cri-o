@@ -1,11 +1,12 @@
 package server
 
 import (
-	"golang.org/x/net/context"
+	"context"
+
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// ListMetricDescriptors lists all metric descriptors
+// ListMetricDescriptors lists all metric descriptors.
 func (s *Server) ListMetricDescriptors(ctx context.Context, req *types.ListMetricDescriptorsRequest) (*types.ListMetricDescriptorsResponse, error) {
 	includedKeys := s.config.IncludedPodMetrics
 	descriptorsMap := s.StatsServer.PopulateMetricDescriptors(includedKeys)

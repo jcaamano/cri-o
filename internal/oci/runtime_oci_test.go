@@ -7,15 +7,16 @@ import (
 	"os/exec"
 	"time"
 
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
+	kwait "k8s.io/apimachinery/pkg/util/wait"
+	kclock "k8s.io/utils/clock"
+
 	"github.com/cri-o/cri-o/internal/oci"
 	libconfig "github.com/cri-o/cri-o/pkg/config"
 	runnerMock "github.com/cri-o/cri-o/test/mocks/cmdrunner"
 	"github.com/cri-o/cri-o/utils/cmdrunner"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	kwait "k8s.io/apimachinery/pkg/util/wait"
-	kclock "k8s.io/utils/clock"
 )
 
 const (
@@ -24,7 +25,7 @@ const (
 	longTimeout   int64 = 15
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Oci", func() {
 	Context("StopContainer", func() {
 		var (
@@ -51,6 +52,7 @@ var _ = t.Describe("Oci", func() {
 
 			cfg, err := libconfig.DefaultConfig()
 			Expect(err).ToNot(HaveOccurred())
+			cfg.ContainerAttachSocketDir = t.MustTempDir("attach-socket")
 			r, err := oci.New(cfg)
 			Expect(err).ToNot(HaveOccurred())
 			runtime = oci.NewRuntimeOCI(r, &libconfig.RuntimeHandler{})
@@ -64,33 +66,19 @@ var _ = t.Describe("Oci", func() {
 			)
 		})
 		AfterEach(func() {
-			// nolint:errcheck
+			//nolint:errcheck
 			oci.Kill(sleepProcess.Process.Pid)
 			// make sure the entry in the process table is cleaned up
-			// nolint:errcheck
+			//nolint:errcheck
 			sleepProcess.Wait()
 			cmdrunner.ResetPrependedCmd()
 		})
 
-		It("should fail to stop if container paused", func() {
-			state := &oci.ContainerState{}
-			state.Status = oci.ContainerStatePaused
-			sut.SetState(state)
-
-			Expect(sut.ShouldBeStopped()).NotTo(Succeed())
-		})
-		It("should fail to stop if container stopped", func() {
-			state := &oci.ContainerState{}
-			state.Status = oci.ContainerStateStopped
-			sut.SetState(state)
-
-			Expect(sut.ShouldBeStopped()).To(Equal(oci.ErrContainerStopped))
-		})
 		It("should return early if runtime command fails and process stopped", func() {
 			// Given
 			gomock.InOrder(
 				runner.EXPECT().Command(gomock.Any(), gomock.Any()).DoAndReturn(
-					func(_ string, _ ...string) interface{} {
+					func(_ string, _ ...string) any {
 						Expect(oci.Kill(sleepProcess.Process.Pid)).To(Succeed())
 						waitForKillToComplete(sleepProcess)
 						return exec.Command("/bin/false")
@@ -112,7 +100,7 @@ var _ = t.Describe("Oci", func() {
 			// Given
 			gomock.InOrder(
 				runner.EXPECT().Command(gomock.Any(), gomock.Any()).DoAndReturn(
-					func(_ string, _ ...string) interface{} {
+					func(_ string, _ ...string) any {
 						Expect(oci.Kill(sleepProcess.Process.Pid)).To(Succeed())
 						waitForKillToComplete(sleepProcess)
 						return exec.Command("/bin/true")
@@ -123,7 +111,7 @@ var _ = t.Describe("Oci", func() {
 			go runtime.StopLoopForContainer(sut, bm)
 
 			// Then
-			waitOnContainerTimeout(sut, longTimeout, mediumTimeout, sleepProcess)
+			waitOnContainerTimeout(sut, shortTimeout, mediumTimeout, sleepProcess)
 		})
 		It("should fall back to KILL after timeout", func() {
 			// Given
@@ -233,12 +221,12 @@ var _ = t.Describe("Oci", func() {
 func containerIgnoreSignalCmdrunnerMock(sleepProcess *exec.Cmd, runner *runnerMock.MockCommandRunner) {
 	gomock.InOrder(
 		runner.EXPECT().Command(gomock.Any(), gomock.Any()).DoAndReturn(
-			func(_ string, _ ...string) interface{} {
+			func(_ string, _ ...string) any {
 				return exec.Command("/bin/true")
 			},
 		),
 		runner.EXPECT().Command(gomock.Any(), gomock.Any()).DoAndReturn(
-			func(_ string, _ ...string) interface{} {
+			func(_ string, _ ...string) any {
 				Expect(oci.Kill(sleepProcess.Process.Pid)).To(Succeed())
 				waitForKillToComplete(sleepProcess)
 				return exec.Command("/bin/true")

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
+
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/storage"
-	"golang.org/x/net/context"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 // ListImages lists existing images.

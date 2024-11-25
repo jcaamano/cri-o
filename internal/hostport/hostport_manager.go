@@ -26,50 +26,46 @@ import (
 	"strings"
 	"sync"
 
-	utiliptables "github.com/cri-o/cri-o/internal/iptables"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	v1 "k8s.io/api/core/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	utilexec "k8s.io/utils/exec"
 	utilnet "k8s.io/utils/net"
+
+	utiliptables "github.com/cri-o/cri-o/internal/iptables"
 )
 
 // HostPortManager is an interface for adding and removing hostport for a given pod sandbox.
-// nolint:golint // no reason to change the type name now "type name will be used as hostport.HostPortManager by other packages"
+//
+//nolint:golint // no reason to change the type name now "type name will be used as hostport.HostPortManager by other packages"
 type HostPortManager interface {
 	// Add implements port mappings.
 	// id should be a unique identifier for a pod, e.g. podSandboxID.
 	// podPortMapping is the associated port mapping information for the pod.
-	// natInterfaceName is the interface that localhost uses to talk to the given pod, if known.
-	Add(id string, podPortMapping *PodPortMapping, natInterfaceName string) error
+	Add(id string, podPortMapping *PodPortMapping) error
 	// Remove cleans up matching port mappings
 	// Remove must be able to clean up port mappings without pod IP
 	Remove(id string, podPortMapping *PodPortMapping) error
 }
 
 type hostportManager struct {
-	hostPortMap map[hostport]closeable
-	iptables    utiliptables.Interface
-	portOpener  hostportOpener
-	mu          sync.Mutex
+	ip4tables utiliptables.Interface
+	ip6tables utiliptables.Interface
+	mu        sync.Mutex
 }
 
-// NewHostportManager creates a new HostPortManager
-func NewHostportManager(iptables utiliptables.Interface) HostPortManager {
-	h := &hostportManager{
-		hostPortMap: make(map[hostport]closeable),
-		iptables:    iptables,
-		portOpener:  openLocalPort,
+// NewHostportManager creates a new HostPortManager.
+func NewHostportManager() HostPortManager {
+	exec := utilexec.New()
+	return &hostportManager{
+		ip4tables: utiliptables.New(exec, utiliptables.ProtocolIPv4),
+		ip6tables: utiliptables.New(exec, utiliptables.ProtocolIPv6),
 	}
-
-	return h
 }
 
-func (hm *hostportManager) Add(id string, podPortMapping *PodPortMapping, natInterfaceName string) (err error) {
-	if podPortMapping == nil || podPortMapping.HostNetwork {
-		return nil
-	}
+func (hm *hostportManager) Add(id string, podPortMapping *PodPortMapping) (err error) {
 	podFullName := getPodFullName(podPortMapping)
 	// IP.To16() returns nil if IP is not a valid IPv4 or IPv6 address
 	if podPortMapping.IP.To16() == nil {
@@ -84,35 +80,28 @@ func (hm *hostportManager) Add(id string, podPortMapping *PodPortMapping, natInt
 		return nil
 	}
 
-	if isIPv6 != hm.iptables.IsIPv6() {
-		return fmt.Errorf("HostPortManager IP family mismatch: %v, isIPv6 - %v", podIP, isIPv6)
+	var ipt utiliptables.Interface
+	if isIPv6 {
+		ipt = hm.ip6tables
+	} else {
+		ipt = hm.ip4tables
 	}
 
-	if err := ensureKubeHostportChains(hm.iptables, natInterfaceName); err != nil {
+	if err := ensureKubeHostportChains(ipt); err != nil {
 		return err
 	}
 
-	// Ensure atomicity for port opening and iptables operations
+	// Ensure atomicity for iptables operations
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
-
-	// try to open hostports
-	ports, err := hm.openHostports(podPortMapping)
-	if err != nil {
-		return err
-	}
-	for hostport, socket := range ports {
-		hm.hostPortMap[hostport] = socket
-	}
 
 	natChains := bytes.NewBuffer(nil)
 	natRules := bytes.NewBuffer(nil)
 	writeLine(natChains, "*nat")
 
-	existingChains, existingRules, err := getExistingHostportIPTablesRules(hm.iptables)
+	existingChains, existingRules, err := getExistingHostportIPTablesRules(ipt)
 	if err != nil {
-		// clean up opened host port if encounter any error
-		return utilerrors.NewAggregate([]error{err, hm.closeHostports(hostportMappings)})
+		return err
 	}
 
 	newChains := []utiliptables.Chain{}
@@ -183,9 +172,8 @@ func (hm *hostportManager) Add(id string, podPortMapping *PodPortMapping, natInt
 	}
 	writeLine(natRules, "COMMIT")
 
-	if err = hm.syncIPTables(append(natChains.Bytes(), natRules.Bytes()...)); err != nil {
-		// clean up opened host port if encounter any error
-		return utilerrors.NewAggregate([]error{err, hm.closeHostports(hostportMappings)})
+	if err := syncIPTables(ipt, append(natChains.Bytes(), natRules.Bytes()...)); err != nil {
+		return err
 	}
 
 	// Remove conntrack entries just after adding the new iptables rules. If the conntrack entry is removed along with
@@ -205,22 +193,34 @@ func (hm *hostportManager) Add(id string, podPortMapping *PodPortMapping, natInt
 }
 
 func (hm *hostportManager) Remove(id string, podPortMapping *PodPortMapping) (err error) {
-	if podPortMapping == nil || podPortMapping.HostNetwork {
-		return nil
+	var errors []error
+	// Remove may not have the IP information, so we try to clean us much as possible
+	// and warn about the possible errors
+	err = hm.removeForFamily(id, podPortMapping, hm.ip4tables)
+	if err != nil {
+		errors = append(errors, err)
+	}
+	err = hm.removeForFamily(id, podPortMapping, hm.ip6tables)
+	if err != nil {
+		errors = append(errors, err)
 	}
 
-	hostportMappings := gatherHostportMappings(podPortMapping, hm.iptables.IsIPv6())
+	return utilerrors.NewAggregate(errors)
+}
+
+func (hm *hostportManager) removeForFamily(id string, podPortMapping *PodPortMapping, ipt utiliptables.Interface) (err error) {
+	hostportMappings := gatherHostportMappings(podPortMapping, ipt.IsIPv6())
 	if len(hostportMappings) == 0 {
 		return nil
 	}
 
-	// Ensure atomicity for port closing and iptables operations
+	// Ensure atomicity for iptables operations
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
 
 	var existingChains map[utiliptables.Chain]string
 	var existingRules []string
-	existingChains, existingRules, err = getExistingHostportIPTablesRules(hm.iptables)
+	existingChains, existingRules, err = getExistingHostportIPTablesRules(ipt)
 	if err != nil {
 		return err
 	}
@@ -246,9 +246,8 @@ func (hm *hostportManager) Remove(id string, podPortMapping *PodPortMapping) (er
 	}
 
 	// exit if there is nothing to remove
-	// don´t forget to clean up opened pod host ports
 	if len(existingChainsToRemove) == 0 {
-		return hm.closeHostports(hostportMappings)
+		return nil
 	}
 
 	natChains := bytes.NewBuffer(nil)
@@ -265,92 +264,17 @@ func (hm *hostportManager) Remove(id string, podPortMapping *PodPortMapping) (er
 	}
 	writeLine(natRules, "COMMIT")
 
-	if err := hm.syncIPTables(append(natChains.Bytes(), natRules.Bytes()...)); err != nil {
-		return err
-	}
-
-	// clean up opened pod host ports
-	return hm.closeHostports(hostportMappings)
+	return syncIPTables(ipt, append(natChains.Bytes(), natRules.Bytes()...))
 }
 
-// syncIPTables executes iptables-restore with given lines
-func (hm *hostportManager) syncIPTables(lines []byte) error {
+// syncIPTables executes iptables-restore with given lines.
+func syncIPTables(ipt utiliptables.Interface, lines []byte) error {
 	logrus.Infof("Restoring iptables rules: %s", lines)
-	err := hm.iptables.RestoreAll(lines, utiliptables.NoFlushTables, utiliptables.RestoreCounters)
+	err := ipt.RestoreAll(lines, utiliptables.NoFlushTables, utiliptables.RestoreCounters)
 	if err != nil {
 		return fmt.Errorf("failed to execute iptables-restore: %w", err)
 	}
 	return nil
-}
-
-// openHostports opens all given hostports using the given hostportOpener
-// If encounter any error, clean up and return the error
-// If all ports are opened successfully, return the hostport and socket mapping
-func (hm *hostportManager) openHostports(podPortMapping *PodPortMapping) (map[hostport]closeable, error) {
-	var retErr error
-	ports := make(map[hostport]closeable)
-	for _, pm := range podPortMapping.PortMappings {
-		if pm.HostPort <= 0 {
-			continue
-		}
-
-		// We do not open host ports for SCTP ports, as we agreed in the Support of SCTP KEP
-		if pm.Protocol == v1.ProtocolSCTP {
-			continue
-		}
-
-		// HostIP IP family is not handled by this port opener
-		if pm.HostIP != "" && utilnet.IsIPv6String(pm.HostIP) != hm.iptables.IsIPv6() {
-			continue
-		}
-
-		hp := portMappingToHostport(pm, hm.getIPFamily())
-		socket, err := hm.portOpener(&hp)
-		if err != nil {
-			retErr = fmt.Errorf("cannot open hostport %d for pod %s: %w", pm.HostPort, getPodFullName(podPortMapping), err)
-			break
-		}
-		ports[hp] = socket
-	}
-
-	// If encounter any error, close all hostports that just got opened.
-	if retErr != nil {
-		for hp, socket := range ports {
-			if err := socket.Close(); err != nil {
-				logrus.Errorf("Cannot clean up hostport %d for pod %s: %v", hp.port, getPodFullName(podPortMapping), err)
-			}
-		}
-		return nil, retErr
-	}
-	return ports, nil
-}
-
-// closeHostports tries to close all the listed host ports
-func (hm *hostportManager) closeHostports(hostportMappings []*PortMapping) error {
-	errList := []error{}
-	for _, pm := range hostportMappings {
-		hp := portMappingToHostport(pm, hm.getIPFamily())
-		if socket, ok := hm.hostPortMap[hp]; ok {
-			logrus.Infof("Closing host port %s", hp.String())
-			if err := socket.Close(); err != nil {
-				errList = append(errList, fmt.Errorf("failed to close host port %s: %w", hp.String(), err))
-				continue
-			}
-			delete(hm.hostPortMap, hp)
-		} else {
-			logrus.Infof("Host port %s does not have an open socket", hp.String())
-		}
-	}
-	return utilerrors.NewAggregate(errList)
-}
-
-// getIPFamily returns the hostPortManager IP family
-func (hm *hostportManager) getIPFamily() ipFamily {
-	family := IPv4
-	if hm.iptables.IsIPv6() {
-		family = IPv6
-	}
-	return family
 }
 
 // getHostportChain takes id, hostport and protocol for a pod and returns associated iptables chain.
@@ -366,7 +290,7 @@ func getHostportChain(prefix, id string, pm *PortMapping) utiliptables.Chain {
 }
 
 // gatherHostportMappings returns all the PortMappings which has hostport for a pod
-// it filters the PortMappings that use HostIP and doesn't match the IP family specified
+// it filters the PortMappings that use HostIP and doesn't match the IP family specified.
 func gatherHostportMappings(podPortMapping *PodPortMapping, isIPv6 bool) []*PortMapping {
 	mappings := []*PortMapping{}
 	for _, pm := range podPortMapping.PortMappings {
@@ -383,7 +307,8 @@ func gatherHostportMappings(podPortMapping *PodPortMapping, isIPv6 bool) []*Port
 
 // getExistingHostportIPTablesRules retrieves raw data from iptables-save, parse it,
 // return all the hostport related chains and rules
-// nolint:gocritic // unnamedResult: consider giving a name to these results
+//
+//nolint:gocritic // unnamedResult: consider giving a name to these results
 func getExistingHostportIPTablesRules(iptables utiliptables.Interface) (map[utiliptables.Chain]string, []string, error) {
 	iptablesData := bytes.NewBuffer(nil)
 	err := iptables.SaveInto(utiliptables.TableNAT, iptablesData)
@@ -527,7 +452,7 @@ func filterRules(rules []string, filters []utiliptables.Chain) []string {
 	return filtered
 }
 
-// filterChains deletes all entries of filter chains from chain map
+// filterChains deletes all entries of filter chains from chain map.
 func filterChains(chains map[utiliptables.Chain]string, filterChains []utiliptables.Chain) {
 	for _, chain := range filterChains {
 		delete(chains, chain)
@@ -541,13 +466,10 @@ func getPodFullName(pod *PodPortMapping) string {
 }
 
 // Join all words with spaces, terminate with newline and write to buf.
-// nolint:interfacer
+//
+//nolint:interfacer
 func writeLine(buf *bytes.Buffer, words ...string) {
 	buf.WriteString(strings.Join(words, " ") + "\n")
-}
-
-func (hp *hostport) String() string {
-	return fmt.Sprintf("%s:%d", hp.protocol, hp.port)
 }
 
 func getNetlinkFamily(isIPv6 bool) netlink.InetFamily {

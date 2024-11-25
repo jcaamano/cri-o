@@ -1,14 +1,15 @@
 package oci
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"time"
 
 	"github.com/containernetworking/plugins/pkg/ns"
+
 	"github.com/cri-o/cri-o/internal/log"
-	"golang.org/x/net/context"
 )
 
 // PortForwardContainer forwards the specified port into the provided container.
@@ -44,7 +45,7 @@ func (r *runtimeOCI) PortForwardContainer(ctx context.Context, c *Container, net
 
 		errCh := make(chan error, 2)
 
-		debug := func(format string, args ...interface{}) {
+		debug := func(format string, args ...any) {
 			log.Debugf(ctx, fmt.Sprintf(
 				"PortForward (id: %s, port: %d): %s", c.ID(), port, format,
 			), args...)

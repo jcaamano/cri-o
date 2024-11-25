@@ -15,6 +15,7 @@ main() {
     install_conmon
     install_conmonrs
     install_critools
+    install_crun
     install_runc
     install_ginkgo
     install_cni_plugins
@@ -117,27 +118,25 @@ install_cni_plugins() {
     ls -lah "$CNI_DIR"
 }
 
+install_crun() {
+    git clone https://github.com/containers/crun
+    pushd crun
+    ./autogen.sh
+    ./configure
+    sudo make -j "$(nproc)" install prefix=/usr
+    popd
+    sudo rm -rf crun
+    crun --version
+}
+
 install_runc() {
-    # Once https://github.com/opencontainers/runc/issues/4233 is fixed,
-    # we can delete go 1.21.9 and link the latest go toolchain.
-    GO_BINARY_URL="https://storage.googleapis.com/golang/go1.21.9.linux-$GOARCH.tar.gz"
-    GO_INSTALLATION_DIR="$(pwd)/go1.21.9"
-    RUNC_DIR="$(pwd)/runc"
-
-    mkdir -p "$GO_INSTALLATION_DIR"
-    curl -L -o - "$GO_BINARY_URL" | tar -xz -C "$GO_INSTALLATION_DIR"
-
-    git clone https://github.com/opencontainers/runc.git "$RUNC_DIR"
-
-    pushd "$RUNC_DIR"
+    git clone https://github.com/opencontainers/runc
+    pushd runc
     git checkout "${VERSIONS["runc"]}"
-    GOROOT="$GO_INSTALLATION_DIR/go"
-    make GO="$GOROOT/bin/go"
+    make
     sudo install -D -m0755 runc /usr/sbin/runc
     popd
-    # Remove the runc and go repositories.
-    rm -rf "$RUNC_DIR"
-    rm -rf "$GO_INSTALLATION_DIR"
+    rm -rf runc
     runc --version
 }
 
@@ -146,7 +145,7 @@ install_ginkgo() {
     for i in $GOPATH "$(go env GOCACHE)"; do
         sudo chown -R "$(id -u):$(id -g)" "$i"
     done
-    go install github.com/onsi/ginkgo/ginkgo@latest
+    go install github.com/onsi/ginkgo/v2/ginkgo@latest
     sudo -E cp "$GOPATH/bin/ginkgo" /usr/bin
     ginkgo version
 }

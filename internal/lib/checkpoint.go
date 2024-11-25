@@ -10,16 +10,17 @@ import (
 
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
 	"github.com/checkpoint-restore/go-criu/v7/stats"
-	"github.com/containers/podman/v5/pkg/checkpoint/crutils"
+	"github.com/containers/common/pkg/crutils"
 	"github.com/containers/storage/pkg/archive"
+	rspec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-tools/generate"
+
 	"github.com/cri-o/cri-o/internal/log"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/pkg/annotations"
-	rspec "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/opencontainers/runtime-tools/generate"
 )
 
-// ContainerCheckpointOptions is the relevant subset of libpod.ContainerCheckpointOptions
+// ContainerCheckpointOptions is the relevant subset of libpod.ContainerCheckpointOptions.
 type ContainerCheckpointOptions struct {
 	// Keep tells the API to not delete checkpoint artifacts
 	Keep bool
@@ -126,7 +127,7 @@ func (c *ContainerServer) ContainerCheckpoint(
 	return ctr.ID(), nil
 }
 
-// Copied from libpod/diff.go
+// Copied from libpod/diff.go.
 var containerMounts = map[string]bool{
 	"/dev":               true,
 	"/dev/shm":           true,
@@ -153,7 +154,7 @@ func skipBindMount(mountPath string, specgen *rspec.Spec) bool {
 }
 
 // getDiff returns the file system differences
-// Copied from libpod/diff.go and simplified for the checkpoint use case
+// Copied from libpod/diff.go and simplified for the checkpoint use case.
 func (c *ContainerServer) getDiff(ctx context.Context, id string, specgen *rspec.Spec) (rchanges []archive.Change, err error) {
 	layerID, err := c.GetContainerTopLayerID(ctx, id)
 	if err != nil {
@@ -183,7 +184,7 @@ type ExternalBindMount struct {
 
 // prepareCheckpointExport writes the config and spec to
 // JSON files for later export
-// Podman: libpod/container_internal.go
+// Podman: libpod/container_internal.go.
 func (c *ContainerServer) prepareCheckpointExport(ctr *oci.Container) error {
 	// save spec
 	jsonPath := filepath.Join(ctr.BundlePath(), "config.json")
@@ -200,8 +201,8 @@ func (c *ContainerServer) prepareCheckpointExport(ctr *oci.Container) error {
 		rootFSImageRef = id.IDStringForOutOfProcessConsumptionOnly()
 	}
 	rootFSImageName := ""
-	if imageName := ctr.ImageName(); imageName != nil {
-		rootFSImageName = imageName.StringForOutOfProcessConsumptionOnly()
+	if someNameOfTheImage := ctr.SomeNameOfTheImage(); someNameOfTheImage != nil {
+		rootFSImageName = someNameOfTheImage.StringForOutOfProcessConsumptionOnly()
 	}
 	config := &metadata.ContainerConfig{
 		ID:              ctr.ID(),

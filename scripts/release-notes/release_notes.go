@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/blang/semver/v4"
-	"github.com/cri-o/cri-o/internal/version"
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/release-sdk/git"
 	"sigs.k8s.io/release-utils/command"
 	"sigs.k8s.io/release-utils/util"
+
+	"github.com/cri-o/cri-o/internal/version"
 )
 
 const (
@@ -235,6 +236,7 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 		"--repo-path=/tmp/cri-o-repo",
 		"--required-author=",
 		"--start-rev="+startTag,
+		"--skip-first-commit",
 		"--end-sha="+head,
 		"--output="+outputFilePath,
 		"--toc",
@@ -309,7 +311,11 @@ To verify the bill of materials (SBOM) in [SPDX](https://spdx.org) format using 
 	const maxRetries = 10
 	for i := 0; i <= maxRetries; i++ {
 		if err := command.New("git", "pull", "--rebase").RunSuccess(); err != nil {
-			return fmt.Errorf("pull and rebase from remote: %w", err)
+			logrus.Errorf("Pull and rebase from remote failed (skipping): %v", err)
+			// A failed release notes GitHub pages update is not critical and
+			// we need the release notes as part of the next CI step to
+			// actually create the release.
+			return nil
 		}
 
 		err := repo.Push(branch)
@@ -361,7 +367,7 @@ func decVersion(tag string) string {
 	// clear any RC
 	sv.Pre = nil
 
-	if sv.Patch > 0 { // nolint: gocritic
+	if sv.Patch > 0 { //nolint: gocritic
 		sv.Patch-- // 1.17.2 -> 1.17.1
 	} else if sv.Minor > 0 {
 		sv.Minor-- // 1.18.0 -> 1.17.0

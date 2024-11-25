@@ -8,18 +8,20 @@ import (
 
 	criu "github.com/checkpoint-restore/go-criu/v7/utils"
 	"github.com/containers/storage/pkg/archive"
+	"github.com/containers/storage/pkg/unshare"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"go.uber.org/mock/gomock"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	kubetypes "k8s.io/kubelet/pkg/types"
+
 	"github.com/cri-o/cri-o/internal/mockutils"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/internal/storage/references"
 	crioann "github.com/cri-o/cri-o/pkg/annotations"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	kubetypes "k8s.io/kubelet/pkg/types"
 )
 
 var _ = t.Describe("ContainerRestore", func() {
@@ -30,7 +32,7 @@ var _ = t.Describe("ContainerRestore", func() {
 		}
 		beforeEach()
 		createDummyConfig()
-		mockRuncInLibConfig()
+		mockRuntimeInLibConfig()
 		serverConfig.SetCheckpointRestore(true)
 		setupSUT()
 	})
@@ -75,7 +77,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
@@ -99,7 +101,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 			// Then
@@ -121,7 +123,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 			// Then
@@ -155,7 +157,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 			// Then
@@ -192,7 +194,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
@@ -231,7 +233,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
@@ -276,7 +278,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
@@ -324,7 +326,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
@@ -375,64 +377,12 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 
 			// Then
 			Expect(err.Error()).To(Equal(`failed to read "io.kubernetes.cri-o.Labels": unexpected end of JSON input`))
-		})
-	})
-	t.Describe("ContainerRestore from archive into new pod", func() {
-		It("should fail with 'PodSandboxId should not be empty'", func() {
-			// Given
-			addContainerAndSandbox()
-			testContainer.SetStateAndSpoofPid(&oci.ContainerState{
-				State: specs.State{Status: oci.ContainerStateRunning},
-			})
-
-			err := os.WriteFile(
-				"spec.dump",
-				[]byte(
-					`{"annotations":{"io.kubernetes.cri-o.Metadata"`+
-						`:"{\"name\":\"container-to-restore\"}",`+
-						`"io.kubernetes.cri-o.Annotations": "{\"name\":\"NAME\"}",`+
-						`"io.kubernetes.cri-o.Labels": "{\"io.kubernetes.container.name\":\"counter\"}"}}`),
-				0o644,
-			)
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("spec.dump")
-			err = os.WriteFile("config.dump", []byte(`{"rootfsImageName": "image"}`), 0o644)
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("config.dump")
-			outFile, err := os.Create("archive.tar")
-			Expect(err).ToNot(HaveOccurred())
-			defer outFile.Close()
-			input, err := archive.TarWithOptions(".", &archive.TarOptions{
-				Compression:      archive.Uncompressed,
-				IncludeSourceDir: true,
-				IncludeFiles:     []string{"spec.dump", "config.dump"},
-			})
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll("archive.tar")
-			_, err = io.Copy(outFile, input)
-			Expect(err).ToNot(HaveOccurred())
-			containerConfig := &types.ContainerConfig{
-				Image: &types.ImageSpec{
-					Image: "archive.tar",
-				},
-			}
-			// When
-
-			_, err = sut.CRImportCheckpoint(
-				context.Background(),
-				containerConfig,
-				"",
-				"",
-			)
-
-			// Then
-			Expect(err.Error()).To(Equal(`PodSandboxId should not be empty`))
 		})
 	})
 	t.Describe("ContainerRestore from archive into new pod", func() {
@@ -445,6 +395,10 @@ var _ = t.Describe("ContainerRestore", func() {
 		}
 		for _, image := range images {
 			It(fmt.Sprintf("should succeed (%s)", image.config), func() {
+				if unshare.IsRootless() {
+					Skip("should run as root")
+				}
+
 				// Given
 				addContainerAndSandbox()
 				testContainer.SetStateAndSpoofPid(&oci.ContainerState{
@@ -568,7 +522,7 @@ var _ = t.Describe("ContainerRestore", func() {
 				_, err = sut.CRImportCheckpoint(
 					context.Background(),
 					containerConfig,
-					"",
+					testSandbox,
 					"new-sandbox-id",
 				)
 
@@ -580,6 +534,7 @@ var _ = t.Describe("ContainerRestore", func() {
 	t.Describe("ContainerRestore from OCI archive", func() {
 		It("should fail because archive does not exist", func() {
 			// Given
+			addContainerAndSandbox()
 			size := uint64(100)
 			checkpointImageName, err := references.ParseRegistryImageReferenceFromOutOfProcessData("localhost/checkpoint-image:tag1")
 			Expect(err).ToNot(HaveOccurred())
@@ -616,7 +571,7 @@ var _ = t.Describe("ContainerRestore", func() {
 			_, err = sut.CRImportCheckpoint(
 				context.Background(),
 				containerConfig,
-				"",
+				testSandbox,
 				"",
 			)
 

@@ -4,13 +4,13 @@ import (
 	"os"
 	"path/filepath"
 
-	sboxfactory "github.com/cri-o/cri-o/internal/factory/sandbox"
-	libsandbox "github.com/cri-o/cri-o/internal/lib/sandbox"
-
-	"github.com/cri-o/cri-o/pkg/config"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+
+	sboxfactory "github.com/cri-o/cri-o/internal/factory/sandbox"
+	libsandbox "github.com/cri-o/cri-o/internal/lib/sandbox"
+	"github.com/cri-o/cri-o/pkg/config"
 )
 
 const (
@@ -52,8 +52,8 @@ var _ = Describe("Sandbox", func() {
 			defer os.Remove(c.Path)
 			Expect(err).ToNot(HaveOccurred())
 
-			expect, _ := os.ReadFile(c.Want) // nolint: errcheck
-			result, _ := os.ReadFile(c.Path) // nolint: errcheck
+			expect, _ := os.ReadFile(c.Want) //nolint: errcheck
+			result, _ := os.ReadFile(c.Path) //nolint: errcheck
 			Expect(result).To(Equal(expect))
 		}
 	})
@@ -153,8 +153,7 @@ var _ = Describe("Sandbox", func() {
 		It("should fail if shm size is <= 0", func() {
 			// When
 			shmSize = int64(-1)
-			dir, err := os.MkdirTemp("/tmp", "shmsetup-test")
-			Expect(err).ToNot(HaveOccurred())
+			dir := t.MustTempDir("shmsetup-test-")
 
 			// When
 			res, err := sboxfactory.SetupShm(dir, mountLabel, shmSize)
@@ -167,8 +166,7 @@ var _ = Describe("Sandbox", func() {
 		It("should fail if mount label is empty", func() {
 			// When
 			mountLabel = ""
-			dir, err := os.MkdirTemp("/tmp", "shmsetup-test")
-			Expect(err).ToNot(HaveOccurred())
+			dir := t.MustTempDir("shmsetup-test-")
 
 			// When
 			res, err := sboxfactory.SetupShm(dir, mountLabel, shmSize)
@@ -180,10 +178,9 @@ var _ = Describe("Sandbox", func() {
 
 		It("should fail if dir already exists", func() {
 			// Given
-			dir, err := os.MkdirTemp("/tmp", "shmsetup-test")
-			Expect(err).ToNot(HaveOccurred())
+			dir := t.MustTempDir("shmsetup-test-")
 			shmPath := filepath.Join(dir, "shm")
-			err = os.Mkdir(shmPath, 0o700)
+			err := os.Mkdir(shmPath, 0o700)
 			Expect(err).ToNot(HaveOccurred())
 
 			// When

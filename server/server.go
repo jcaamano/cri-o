@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -15,17 +14,24 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	imageTypes "github.com/containers/image/v5/types"
 	"github.com/containers/storage/pkg/idtools"
 	storageTypes "github.com/containers/storage/types"
+	"github.com/fsnotify/fsnotify"
+	"golang.org/x/sys/unix"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/kubelet/pkg/cri/streaming"
+	kubetypes "k8s.io/kubelet/pkg/types"
+
+	"github.com/cri-o/cri-o/internal/cert"
 	"github.com/cri-o/cri-o/internal/config/seccomp"
 	"github.com/cri-o/cri-o/internal/hostport"
 	"github.com/cri-o/cri-o/internal/lib"
 	"github.com/cri-o/cri-o/internal/lib/sandbox"
 	"github.com/cri-o/cri-o/internal/log"
+	nriIf "github.com/cri-o/cri-o/internal/nri"
 	"github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/resourcestore"
 	"github.com/cri-o/cri-o/internal/runtimehandlerhooks"
@@ -35,18 +41,9 @@ import (
 	libconfig "github.com/cri-o/cri-o/pkg/config"
 	"github.com/cri-o/cri-o/server/metrics"
 	"github.com/cri-o/cri-o/utils"
-	"github.com/fsnotify/fsnotify"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
-	types "k8s.io/cri-api/pkg/apis/runtime/v1"
-	"k8s.io/kubelet/pkg/cri/streaming"
-	kubetypes "k8s.io/kubelet/pkg/types"
-
-	nriIf "github.com/cri-o/cri-o/internal/nri"
 )
 
 const (
-	certRefreshInterval            = time.Minute * 5
 	rootlessEnvName                = "_CRIO_ROOTLESS"
 	irqBalanceConfigRestoreDisable = "disable"
 	debounceDuration               = 200 * time.Millisecond
@@ -64,10 +61,10 @@ type StreamService struct {
 	streaming.Runtime
 }
 
-// Server implements the RuntimeService and ImageService
+// Server implements the RuntimeService and ImageService.
 type Server struct {
 	config          libconfig.Config
-	stream          StreamService
+	stream          *StreamService
 	hostportManager hostport.HostPortManager
 
 	*lib.ContainerServer
@@ -111,70 +108,34 @@ type pullOperation struct {
 	// wg allows for Goroutines trying to pull the same image to wait until the
 	// currently running pull operation has finished.
 	wg sync.WaitGroup
-	// imageRef is the reference of the actually pulled image which will differ
-	// from the input if it was a short name (e.g., alpine).
-	imageRef string
+	// imageRef is the reference of the actually pulled image; it is always
+	// in a full repo@digest format, resolving short names and tags
+	imageRef storage.RegistryImageReference
 	// err is the error indicating if the pull operation has succeeded or not.
 	err error
 }
 
-type certConfigCache struct {
-	config  *tls.Config
-	expires time.Time
-
-	tlsCert string
-	tlsKey  string
-	tlsCA   string
-}
-
-// GetConfigForClient gets the tlsConfig for the streaming server.
-// This allows the certs to be swapped, without shutting down crio.
-func (cc *certConfigCache) GetConfigForClient(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-	if cc.config != nil && time.Now().Before(cc.expires) {
-		return cc.config, nil
-	}
-	config := new(tls.Config)
-	cert, err := tls.LoadX509KeyPair(cc.tlsCert, cc.tlsKey)
-	if err != nil {
-		return nil, err
-	}
-	config.Certificates = []tls.Certificate{cert}
-	if cc.tlsCA != "" {
-		caBytes, err := os.ReadFile(cc.tlsCA)
-		if err != nil {
-			return nil, fmt.Errorf("read TLS CA file: %w", err)
-		}
-		certPool := x509.NewCertPool()
-		certPool.AppendCertsFromPEM(caBytes)
-		config.ClientCAs = certPool
-		config.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-	cc.config = config
-	cc.expires = time.Now().Add(certRefreshInterval)
-	return config, nil
-}
-
-// StopStreamServer stops the stream server
+// StopStreamServer stops the stream server.
 func (s *Server) StopStreamServer() error {
 	return s.stream.streamServer.Stop()
 }
 
-// StreamingServerCloseChan returns the close channel for the streaming server
+// StreamingServerCloseChan returns the close channel for the streaming server.
 func (s *Server) StreamingServerCloseChan() chan struct{} {
 	return s.stream.streamServerCloseCh
 }
 
-// getExec returns exec stream request
+// getExec returns exec stream request.
 func (s *Server) getExec(req *types.ExecRequest) (*types.ExecResponse, error) {
 	return s.stream.streamServer.GetExec(req)
 }
 
-// getAttach returns attach stream request
+// getAttach returns attach stream request.
 func (s *Server) getAttach(req *types.AttachRequest) (*types.AttachResponse, error) {
 	return s.stream.streamServer.GetAttach(req)
 }
 
-// getPortForward returns port forward stream request
+// getPortForward returns port forward stream request.
 func (s *Server) getPortForward(req *types.PortForwardRequest) (*types.PortForwardResponse, error) {
 	return s.stream.streamServer.GetPortForward(req)
 }
@@ -221,8 +182,18 @@ func (s *Server) restore(ctx context.Context) []storage.StorageImageID {
 
 	// Go through all the pods and check if it can be restored. If an error occurs, delete the pod and any containers
 	// associated with it. Release the pod and container names as well.
+	knownPods := []*sandbox.Sandbox{}
 	for sbID := range pods {
 		sb, err := s.LoadSandbox(ctx, sbID)
+		// If we were able to restore a sandbox, add the pod id to the list of deletedPods, to be able to call CNI DEL
+		// on the sandbox network. Otherwise, exclude pods for which we weren't able to restore a sandbox from the
+		// knownPods list so that any potential stale resource associated to them is cleaned up in the network plugin GC
+		if sb != nil {
+			knownPods = append(knownPods, sb)
+			if err != nil {
+				deletedPods[sbID] = sb
+			}
+		}
 		if err == nil {
 			continue
 		}
@@ -255,11 +226,6 @@ func (s *Server) restore(ctx context.Context) []storage.StorageImageID {
 			// causing a useless debug message.
 			delete(podContainers, k)
 		}
-		// Add the pod id to the list of deletedPods, to be able to call CNI DEL on the sandbox network.
-		// Unfortunately, if we weren't able to restore a sandbox, then there's little that can be done
-		if sb != nil {
-			deletedPods[sbID] = sb
-		}
 	}
 
 	// Go through all the containers and check if it can be restored. If an error occurs, delete the container and
@@ -278,6 +244,13 @@ func (s *Server) restore(ctx context.Context) []storage.StorageImageID {
 			// Release the container name
 			s.ReleaseContainerName(ctx, n)
 		}
+	}
+
+	// Cleanup any potential stale network resources not associated to any
+	// pod known to us using CNI GC
+	err = s.networkGC(context.Background(), knownPods)
+	if err != nil {
+		log.Errorf(ctx, "Garbage collect stale network resources during server startup failed: %v", err)
 	}
 
 	// Cleanup the deletedPods in the networking plugin
@@ -320,7 +293,7 @@ func (s *Server) restore(ctx context.Context) []storage.StorageImageID {
 	return imagesOfDeletedContainers
 }
 
-// Shutdown attempts to shut down the server's storage cleanly
+// Shutdown attempts to shut down the server's storage cleanly.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.config.CNIManagerShutdown()
 	s.resourceStore.Close()
@@ -382,7 +355,7 @@ func getIDMappings(config *libconfig.Config) (*idtools.IDMappings, error) {
 	return idtools.NewIDMappingsFromMaps(parsedUIDsMappings, parsedGIDsMappings), nil
 }
 
-// New creates a new Server with the provided context and configuration
+// New creates a new Server with the provided context and configuration.
 func New(
 	ctx context.Context,
 	configIface libconfig.Iface,
@@ -392,7 +365,7 @@ func New(
 	}
 	config := configIface.GetData()
 
-	useDefaultUmask()
+	useDefaultUmask(ctx)
 
 	config.SystemContext.AuthFilePath = config.GlobalAuthFile
 	config.SystemContext.SignaturePolicyPath = config.SignaturePolicyPath
@@ -423,7 +396,7 @@ func New(
 	if config.RuntimeConfig.DisableHostPortMapping {
 		hostportManager = hostport.NewNoopHostportManager()
 	} else {
-		hostportManager = hostport.NewMetaHostportManager()
+		hostportManager = hostport.NewHostportManager()
 	}
 
 	idMappings, err := getIDMappings(config)
@@ -444,6 +417,7 @@ func New(
 		ContainerServer:          containerServer,
 		hostportManager:          hostportManager,
 		config:                   *config,
+		stream:                   &StreamService{},
 		monitorsChan:             make(chan struct{}),
 		defaultIDMappings:        idMappings,
 		minimumMappableUID:       config.MinimumMappableUID,
@@ -495,24 +469,27 @@ func New(
 		streamServerConfig.StreamIdleTimeout = idleTimeout
 	}
 	streamServerConfig.Addr = net.JoinHostPort(bindAddressStr, config.StreamPort)
+
+	s.stream.streamServerCloseCh = make(chan struct{})
 	if config.StreamEnableTLS {
-		certCache := &certConfigCache{
-			tlsCert: config.StreamTLSCert,
-			tlsKey:  config.StreamTLSKey,
-			tlsCA:   config.StreamTLSCA,
-		}
-		// We add the certs to the config, even thought the config is dynamic, because
-		// the http package method, ServeTLS, checks to make sure there is a cert in the
-		// config or it throws an error.
-		cert, err := tls.LoadX509KeyPair(config.StreamTLSCert, config.StreamTLSKey)
+		log.Debugf(ctx, "TLS enabled for streaming server")
+		certConf, err := cert.NewCertConfig(ctx, s.stream.streamServerCloseCh, config.StreamTLSCert, config.StreamTLSKey, config.StreamTLSCA)
 		if err != nil {
 			return nil, err
 		}
+		// We add the certs to the config, even thought the config is dynamic, because
+		// the http package method, ServeTLS, checks to make sure there is a certificate in the
+		// config or it throws an error.
+		certificate, err := tls.LoadX509KeyPair(config.StreamTLSCert, config.StreamTLSKey)
+		if err != nil {
+			return nil, fmt.Errorf("load stream server x509 key pair: %w", err)
+		}
 		streamServerConfig.TLSConfig = &tls.Config{
-			GetConfigForClient: certCache.GetConfigForClient,
-			Certificates:       []tls.Certificate{cert},
+			GetConfigForClient: certConf.GetConfigForClient,
+			Certificates:       []tls.Certificate{certificate},
 			MinVersion:         tls.VersionTLS12,
 		}
+		log.Debugf(ctx, "Applying stream server TLS configuration")
 	}
 	s.stream.ctx = ctx
 	s.stream.runtimeServer = s
@@ -521,7 +498,6 @@ func New(
 		return nil, errors.New("unable to create streaming server")
 	}
 
-	s.stream.streamServerCloseCh = make(chan struct{})
 	go func() {
 		defer close(s.stream.streamServerCloseCh)
 		if err := s.stream.streamServer.Start(true); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -537,11 +513,11 @@ func New(
 	}
 	// Start the metrics server if configured to be enabled
 	if s.config.EnableMetrics {
-		if err := metrics.New(&s.config.MetricsConfig).Start(s.monitorsChan); err != nil {
+		if err := metrics.New(&s.config.MetricsConfig).Start(ctx, s.monitorsChan); err != nil {
 			return nil, err
 		}
 	} else {
-		logrus.Debug("Metrics are disabled")
+		log.Debugf(ctx, "Metrics are disabled")
 	}
 
 	if err := s.startSeccompNotifierWatcher(ctx); err != nil {
@@ -576,20 +552,20 @@ func (s *Server) startReloadWatcher(ctx context.Context) {
 		for {
 			// Block until the signal is received
 			<-ch
-			if err := s.config.Reload(); err != nil {
-				logrus.Errorf("Unable to reload configuration: %v", err)
+			if err := s.config.Reload(ctx); err != nil {
+				log.Errorf(ctx, "Unable to reload configuration: %v", err)
 				continue
 			}
 			// ImageServer compiles the list with regex for both
 			// pinned and sandbox/pause images, we need to update them
 			s.StorageImageServer().UpdatePinnedImagesList(append(s.config.PinnedImages, s.config.PauseImage))
-			logrus.Info("Configuration reload completed")
+			log.Infof(ctx, "Configuration reload completed")
 			// Print the current configuration.
 			tomlConfig, err := s.config.ToString()
 			if err != nil {
-				logrus.Errorf("Unable to print current configuration: %v", err)
+				log.Errorf(ctx, "Unable to print current configuration: %v", err)
 			} else {
-				logrus.Infof("Current CRI-O configuration:\n%s", tomlConfig)
+				log.Infof(ctx, "Current CRI-O configuration:\n%s", tomlConfig)
 			}
 		}
 	}()
@@ -597,11 +573,11 @@ func (s *Server) startReloadWatcher(ctx context.Context) {
 	log.Infof(ctx, "Registered SIGHUP reload watcher")
 }
 
-func useDefaultUmask() {
+func useDefaultUmask(ctx context.Context) {
 	const defaultUmask = 0o022
 	oldUmask := unix.Umask(defaultUmask)
 	if oldUmask != defaultUmask {
-		logrus.Infof(
+		log.Infof(ctx,
 			"Using default umask 0o%#o instead of 0o%#o",
 			defaultUmask, oldUmask,
 		)
@@ -746,18 +722,18 @@ func (s *Server) getPodSandboxFromRequest(ctx context.Context, podSandboxID stri
 	return sb, nil
 }
 
-// StopMonitors stops all the monitors
+// StopMonitors stops all the monitors.
 func (s *Server) StopMonitors() {
 	close(s.monitorsChan)
 }
 
-// MonitorsCloseChan returns the close chan for the exit monitor
+// MonitorsCloseChan returns the close chan for the exit monitor.
 func (s *Server) MonitorsCloseChan() chan struct{} {
 	return s.monitorsChan
 }
 
 // StartExitMonitor start a routine that monitors container exits
-// and updates the container status
+// and updates the container status.
 func (s *Server) StartExitMonitor(ctx context.Context) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -861,8 +837,8 @@ func (s *Server) getContainerStatuses(ctx context.Context, sandboxUID string) ([
 		return []*types.ContainerStatus{}, err
 	}
 
-	containerStatuses := []*types.ContainerStatus{}
-	for _, cc := range containers.GetContainers() {
+	containerStatuses := make([]*types.ContainerStatus, len(containers.GetContainers()))
+	for i, cc := range containers.GetContainers() {
 		containerStatusRequest := &types.ContainerStatusRequest{ContainerId: cc.Id}
 		resp, err := s.ContainerStatus(ctx, containerStatusRequest)
 		if isNotFound(err) {
@@ -871,7 +847,7 @@ func (s *Server) getContainerStatuses(ctx context.Context, sandboxUID string) ([
 		if err != nil {
 			return []*types.ContainerStatus{}, err
 		}
-		containerStatuses = append(containerStatuses, resp.GetStatus())
+		containerStatuses[i] = resp.GetStatus()
 	}
 
 	return containerStatuses, nil
@@ -884,8 +860,8 @@ func (s *Server) getContainerStatusesFromSandboxID(ctx context.Context, sandboxI
 		return []*types.ContainerStatus{}, err
 	}
 
-	containerStatuses := []*types.ContainerStatus{}
-	for _, cc := range containers.GetContainers() {
+	containerStatuses := make([]*types.ContainerStatus, len(containers.GetContainers()))
+	for i, cc := range containers.GetContainers() {
 		containerStatusRequest := &types.ContainerStatusRequest{ContainerId: cc.Id, Verbose: false}
 		resp, err := s.ContainerStatus(ctx, containerStatusRequest)
 		if isNotFound(err) {
@@ -894,7 +870,7 @@ func (s *Server) getContainerStatusesFromSandboxID(ctx context.Context, sandboxI
 		if err != nil {
 			return []*types.ContainerStatus{}, err
 		}
-		containerStatuses = append(containerStatuses, resp.GetStatus())
+		containerStatuses[i] = resp.GetStatus()
 	}
 
 	return containerStatuses, nil

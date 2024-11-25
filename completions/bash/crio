@@ -2,15 +2,16 @@ _cli_bash_autocomplete() {
     local cur opts base
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    opts="complete
+    opts="check
+complete
 completion
+config
 man
 markdown
 md
-config
+status
 version
 wipe
-status
 help
 h
 --absent-mount-sources-to-reject
@@ -105,11 +106,11 @@ h
 --profile-cpu
 --profile-mem
 --profile-port
+--pull-progress-timeout
 --rdt-config-file
 --read-only
 --registries-conf
 --registries-conf-dir
---registry
 --root
 --runroot
 --runtimes

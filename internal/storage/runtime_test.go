@@ -3,20 +3,20 @@ package storage_test
 import (
 	"context"
 
-	istorage "github.com/containers/image/v5/storage"
 	"github.com/containers/image/v5/types"
 	cs "github.com/containers/storage"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
+
 	"github.com/cri-o/cri-o/internal/mockutils"
 	"github.com/cri-o/cri-o/internal/storage"
 	"github.com/cri-o/cri-o/internal/storage/references"
 	containerstoragemock "github.com/cri-o/cri-o/test/mocks/containerstorage"
 	criostoragemock "github.com/cri-o/cri-o/test/mocks/criostorage"
-	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Runtime", func() {
 	imageID, err := storage.ParseStorageImageIDFromOutOfProcessData("8a788232037eaf17794408ff3df6b922a1aedf9ef8de36afdae3ed0b0381907b")
 	Expect(err).ToNot(HaveOccurred())
@@ -31,7 +31,7 @@ var _ = t.Describe("Runtime", func() {
 	// The system under test
 	var sut storage.RuntimeServer
 
-	var ctx context.Context
+	ctx := context.TODO()
 
 	// Prepare the system under test and register a test name and key before
 	// each test
@@ -44,8 +44,6 @@ var _ = t.Describe("Runtime", func() {
 
 		sut = storage.GetRuntimeService(context.Background(), imageServerMock, storageTransportMock)
 		Expect(sut).NotTo(BeNil())
-
-		ctx = context.TODO()
 	})
 	AfterEach(func() {
 		mockCtrl.Finish()
@@ -73,7 +71,7 @@ var _ = t.Describe("Runtime", func() {
 		)
 	}
 
-	// nolint: dupl
+	//nolint: dupl
 	t.Describe("GetRunDir", func() {
 		It("should succeed to retrieve the run dir", func() {
 			// Given
@@ -128,7 +126,7 @@ var _ = t.Describe("Runtime", func() {
 		})
 	})
 
-	// nolint: dupl
+	//nolint: dupl
 	t.Describe("GetWorkDir", func() {
 		It("should succeed to retrieve the work dir", func() {
 			// Given
@@ -757,17 +755,16 @@ var _ = t.Describe("Runtime", func() {
 		var info storage.ContainerInfo
 
 		mockCreatePodSandboxExpectingCopyOptions := func(expectedCopyOptions *storage.ImageCopyOptions) {
-			pauseImageRef, err := references.ParseRegistryImageReferenceFromOutOfProcessData("docker.io/library/pauseimagename:latest")
-			Expect(err).ToNot(HaveOccurred())
-			pulledRef, err := istorage.Transport.NewStoreReference(storeMock, pauseImageRef.Raw(), "")
+			pauseImageCanonical, err := references.ParseRegistryImageReferenceFromOutOfProcessData("pauseimagename@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 			Expect(err).ToNot(HaveOccurred())
 			mockutils.InOrder(
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
 				mockResolveReference(storeMock, storageTransportMock,
 					"docker.io/library/pauseimagename:latest", "", ""),
-				imageServerMock.EXPECT().PullImage(gomock.Any(), pauseImageRef, expectedCopyOptions).Return(pulledRef, nil),
+				imageServerMock.EXPECT().PullImage(gomock.Any(), pauseImage, expectedCopyOptions).Return(pauseImageCanonical, nil),
+				imageServerMock.EXPECT().GetStore().Return(storeMock),
 				mockResolveReference(storeMock, storageTransportMock,
-					"docker.io/library/pauseimagename:latest", "", imageID.IDStringForOutOfProcessConsumptionOnly()),
+					"pauseimagename@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", imageID.IDStringForOutOfProcessConsumptionOnly()),
 				imageServerMock.EXPECT().GetStore().Return(storeMock),
 				mockNewImage(storeMock, "", imageID.IDStringForOutOfProcessConsumptionOnly(), imageID.IDStringForOutOfProcessConsumptionOnly()),
 

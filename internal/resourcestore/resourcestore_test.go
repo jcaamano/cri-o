@@ -1,12 +1,13 @@
 package resourcestore_test
 
 import (
+	"context"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/resourcestore"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"golang.org/x/net/context"
+
+	"github.com/cri-o/cri-o/internal/resourcestore"
 )
 
 var (
@@ -27,7 +28,7 @@ func (e *entry) SetCreated() {
 	e.created = true
 }
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ResourceStore", func() {
 	// Setup the test
 	var (
@@ -160,14 +161,13 @@ var _ = t.Describe("ResourceStore", func() {
 		})
 	})
 	Context("Stages", func() {
-		var ctx context.Context
+		ctx := context.Background()
 		BeforeEach(func() {
 			sut = resourcestore.New()
 			cleaner = resourcestore.NewResourceCleaner()
 			e = &entry{
 				id: testID,
 			}
-			ctx = context.Background()
 		})
 		AfterEach(func() {
 			sut.Close()

@@ -7,7 +7,7 @@ import (
 )
 
 // deleteConntrackEntriesForDstPort delete the conntrack entries for the connections specified
-// by the given destination port, protocol and IP family
+// by the given destination port, protocol and IP family.
 func deleteConntrackEntriesForDstPort(port uint16, protocol uint8, family netlink.InetFamily) error {
 	filter := &netlink.ConntrackFilter{}
 	err := filter.AddProtocol(protocol)
@@ -19,7 +19,7 @@ func deleteConntrackEntriesForDstPort(port uint16, protocol uint8, family netlin
 		return fmt.Errorf("error deleting connection tracking state for protocol: %d Port: %d, error: %w", protocol, port, err)
 	}
 
-	_, err = netlink.ConntrackDeleteFilter(netlink.ConntrackTable, family, filter)
+	_, err = netlink.ConntrackDeleteFilters(netlink.ConntrackTable, family, filter)
 	if err != nil {
 		return fmt.Errorf("error deleting connection tracking state for protocol: %d Port: %d, error: %w", protocol, port, err)
 	}

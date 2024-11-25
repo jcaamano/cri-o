@@ -9,21 +9,22 @@ import (
 	criu "github.com/checkpoint-restore/go-criu/v7/utils"
 	cstorage "github.com/containers/storage"
 	"github.com/containers/storage/pkg/archive"
-	"github.com/cri-o/cri-o/internal/lib"
-	"github.com/cri-o/cri-o/internal/oci"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"go.uber.org/mock/gomock"
+
+	"github.com/cri-o/cri-o/internal/lib"
+	"github.com/cri-o/cri-o/internal/oci"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("ContainerCheckpoint", func() {
 	// Prepare the sut
 	BeforeEach(func() {
 		beforeEach()
 		createDummyConfig()
-		mockRuncInLibConfig()
+		mockRuntimeInLibConfig()
 		if err := criu.CheckForCriu(criu.PodCriuVersion); err != nil {
 			Skip("Check CRIU: " + err.Error())
 		}
@@ -89,7 +90,7 @@ var _ = t.Describe("ContainerCheckpoint", func() {
 	t.Describe("ContainerCheckpoint", func() {
 		It("should fail because runtime failure (/bin/false)", func() {
 			// Given
-			mockRuncToFalseInLibConfig()
+			mockRuntimeToFalseInLibConfig()
 
 			addContainerAndSandbox()
 			config := &metadata.ContainerConfig{
@@ -253,7 +254,7 @@ var _ = t.Describe("ContainerCheckpoint", func() {
 			// Then
 			Expect(err).To(HaveOccurred())
 			Expect(res).To(Equal(""))
-			Expect(err.Error()).To(Equal(`not able to read config for container "containerID": template configuration at config.json not found`))
+			Expect(err.Error()).To(ContainSubstring(`not able to read config for container "containerID"`))
 		})
 	})
 })

@@ -3,11 +3,12 @@ package config
 import (
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"text/template"
 )
 
-// WriteTemplate write the configuration template to the provided writer
+// WriteTemplate write the configuration template to the provided writer.
 func (c *Config) WriteTemplate(displayAllConfig bool, w io.Writer) error {
 	const templateName = "config"
 	tpl, err := template.New(templateName).Parse(assembleTemplateString(displayAllConfig, c))
@@ -128,7 +129,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioStorageOption,
 			group:          crioRootConfig,
-			isDefaultValue: stringSliceEqual(dc.StorageOptions, c.StorageOptions),
+			isDefaultValue: slices.Equal(dc.StorageOptions, c.StorageOptions),
 		},
 		{
 			templateString: templateStringCrioLogDir,
@@ -213,7 +214,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioRuntimeDefaultUlimits,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.DefaultUlimits, c.DefaultUlimits),
+			isDefaultValue: slices.Equal(dc.DefaultUlimits, c.DefaultUlimits),
 		},
 		{
 			templateString: templateStringCrioRuntimeNoPivot,
@@ -238,12 +239,12 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioRuntimeConmonEnv,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.ConmonEnv, c.ConmonEnv),
+			isDefaultValue: slices.Equal(dc.ConmonEnv, c.ConmonEnv),
 		},
 		{
 			templateString: templateStringCrioRuntimeDefaultEnv,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.DefaultEnv, c.DefaultEnv),
+			isDefaultValue: slices.Equal(dc.DefaultEnv, c.DefaultEnv),
 		},
 		{
 			templateString: templateStringCrioRuntimeSelinux,
@@ -298,7 +299,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioRuntimeDefaultCapabilities,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.DefaultCapabilities, c.DefaultCapabilities),
+			isDefaultValue: slices.Equal(dc.DefaultCapabilities, c.DefaultCapabilities),
 		},
 		{
 			templateString: templateStringCrioRuntimeAddInheritableCapabilities,
@@ -308,22 +309,22 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioRuntimeDefaultSysctls,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.DefaultSysctls, c.DefaultSysctls),
+			isDefaultValue: slices.Equal(dc.DefaultSysctls, c.DefaultSysctls),
 		},
 		{
 			templateString: templateStringCrioRuntimeAllowedDevices,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.AllowedDevices, c.AllowedDevices),
+			isDefaultValue: slices.Equal(dc.AllowedDevices, c.AllowedDevices),
 		},
 		{
 			templateString: templateStringCrioRuntimeAdditionalDevices,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.AdditionalDevices, c.AdditionalDevices),
+			isDefaultValue: slices.Equal(dc.AdditionalDevices, c.AdditionalDevices),
 		},
 		{
 			templateString: templateStringCrioRuntimeCDISpecDirs,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.CDISpecDirs, c.CDISpecDirs),
+			isDefaultValue: slices.Equal(dc.CDISpecDirs, c.CDISpecDirs),
 		},
 		{
 			templateString: templateStringCrioRuntimeDeviceOwnershipFromSecurityContext,
@@ -333,7 +334,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioRuntimeHooksDir,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.HooksDir, c.HooksDir),
+			isDefaultValue: slices.Equal(dc.HooksDir, c.HooksDir),
 		},
 		{
 			templateString: templateStringCrioRuntimeDefaultMountsFile,
@@ -453,7 +454,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioRuntimeAbsentMountSourcesToReject,
 			group:          crioRuntimeConfig,
-			isDefaultValue: stringSliceEqual(dc.AbsentMountSourcesToReject, c.AbsentMountSourcesToReject),
+			isDefaultValue: slices.Equal(dc.AbsentMountSourcesToReject, c.AbsentMountSourcesToReject),
 		},
 		{
 			templateString: templateStringCrioRuntimeRuntimesRuntimeHandler,
@@ -508,7 +509,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioImagePinnedImages,
 			group:          crioImageConfig,
-			isDefaultValue: stringSliceEqual(dc.PinnedImages, c.PinnedImages),
+			isDefaultValue: slices.Equal(dc.PinnedImages, c.PinnedImages),
 		},
 		{
 			templateString: templateStringCrioImageSignaturePolicy,
@@ -523,7 +524,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioImageInsecureRegistries,
 			group:          crioImageConfig,
-			isDefaultValue: stringSliceEqual(dc.InsecureRegistries, c.InsecureRegistries),
+			isDefaultValue: slices.Equal(dc.InsecureRegistries, c.InsecureRegistries),
 		},
 		{
 			templateString: templateStringCrioImageImageVolumes,
@@ -541,6 +542,11 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 			isDefaultValue: simpleEqual(dc.AutoReloadRegistries, c.AutoReloadRegistries),
 		},
 		{
+			templateString: templateStringCrioImagePullProgressTimeout,
+			group:          crioImageConfig,
+			isDefaultValue: simpleEqual(dc.PullProgressTimeout, c.PullProgressTimeout),
+		},
+		{
 			templateString: templateStringCrioNetworkCniDefaultNetwork,
 			group:          crioNetworkConfig,
 			isDefaultValue: simpleEqual(dc.CNIDefaultNetwork, c.CNIDefaultNetwork),
@@ -553,7 +559,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioNetworkPluginDirs,
 			group:          crioNetworkConfig,
-			isDefaultValue: stringSliceEqual(dc.PluginDirs, c.PluginDirs),
+			isDefaultValue: slices.Equal(dc.PluginDirs, c.PluginDirs),
 		},
 		{
 			templateString: templateStringCrioMetricsEnableMetrics,
@@ -563,7 +569,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioMetricsCollectors,
 			group:          crioMetricsConfig,
-			isDefaultValue: stringSliceEqual(dc.MetricsCollectors.ToSlice(), c.MetricsCollectors.ToSlice()),
+			isDefaultValue: slices.Equal(dc.MetricsCollectors.ToSlice(), c.MetricsCollectors.ToSlice()),
 		},
 		{
 			templateString: templateStringCrioMetricsMetricsHost,
@@ -618,7 +624,7 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 		{
 			templateString: templateStringCrioStatsIncludedPodMetrics,
 			group:          crioNetworkConfig,
-			isDefaultValue: stringSliceEqual(dc.IncludedPodMetrics, c.IncludedPodMetrics),
+			isDefaultValue: slices.Equal(dc.IncludedPodMetrics, c.IncludedPodMetrics),
 		},
 		{
 			templateString: templateStringCrioNRIEnable,
@@ -660,34 +666,8 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 	return crioTemplateConfig, nil
 }
 
-func simpleEqual(a, b interface{}) bool {
+func simpleEqual(a, b any) bool {
 	return a == b
-}
-
-func stringSliceEqual(a, b []string) bool {
-	if (a == nil) && (b == nil) {
-		return true
-	}
-
-	if (a == nil) && (len(b) == 0) {
-		return true
-	}
-
-	if (b == nil) && (len(a) == 0) {
-		return true
-	}
-
-	if len(a) != len(b) {
-		return false
-	}
-
-	for i, v := range a {
-		if v != b[i] {
-			return false
-		}
-	}
-
-	return true
 }
 
 func RuntimesEqual(a, b Runtimes) bool {
@@ -847,21 +827,20 @@ const templateStringCrioAPIStreamIdleTimeout = `# Length of time until open stre
 `
 
 const templateStringCrioAPIStreamTLSCert = `# Path to the x509 certificate file used to serve the encrypted stream. This
-# file can change, and CRI-O will automatically pick up the changes within 5
-# minutes.
+# file can change, and CRI-O will automatically pick up the changes.
 {{ $.Comment }}stream_tls_cert = "{{ .StreamTLSCert }}"
 
 `
 
 const templateStringCrioAPIStreamTLSKey = `# Path to the key file used to serve the encrypted stream. This file can
-# change and CRI-O will automatically pick up the changes within 5 minutes.
+# change and CRI-O will automatically pick up the changes.
 {{ $.Comment }}stream_tls_key = "{{ .StreamTLSKey }}"
 
 `
 
 const templateStringCrioAPIStreamTLSCa = `# Path to the x509 CA(s) file used to verify and authenticate client
 # communication with the encrypted stream. This file can change and CRI-O will
-# automatically pick up the changes within 5 minutes.
+# automatically pick up the changes.
 {{ $.Comment }}stream_tls_ca = "{{ .StreamTLSCA }}"
 
 `
@@ -1231,6 +1210,7 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 # runtime_path = "/path/to/the/executable"
 # runtime_type = "oci"
 # runtime_root = "/path/to/the/root"
+# inherit_default_runtime = false
 # monitor_path = "/path/to/container/monitor"
 # monitor_cgroup = "/cgroup/path"
 # monitor_exec_cgroup = "/cgroup/path"
@@ -1238,6 +1218,7 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 # privileged_without_host_devices = false
 # allowed_annotations = []
 # platform_runtime_paths = { "os/arch" = "/path/to/binary" }
+# no_sync_log = false
 # Where:
 # - runtime-handler: Name used to identify the runtime.
 # - runtime_path (optional, string): Absolute path to the runtime executable in
@@ -1250,6 +1231,9 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 #   state.
 # - runtime_config_path (optional, string): the path for the runtime configuration
 #   file. This can only be used with when using the VM runtime_type.
+# - inherit_default_runtime (optional, bool): when true the runtime_path,
+#   runtime_type, runtime_root and runtime_config_path will be replaced by
+#   the values from the default runtime on load time.
 # - privileged_without_host_devices (optional, bool): an option for restricting
 #   host devices from being passed to privileged containers.
 # - allowed_annotations (optional, array of strings): an option for specifying
@@ -1284,6 +1268,9 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 # - container_min_memory (optional, string): The minimum memory that must be set for a container.
 #   This value can be used to override the currently set global value for a specific runtime. If not set,
 #   a global default value of "12 MiB" will be used.
+# - no_sync_log (optional, bool): If set to true, the runtime will not sync the log file on rotate or container exit.
+#   This option is only valid for the 'oci' runtime type. Setting this option to true can cause data loss, e.g.
+#   when a machine crash happens.
 #
 # Using the seccomp notifier feature:
 #
@@ -1317,6 +1304,7 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 {{ $.Comment }}runtime_path = "{{ $runtime_handler.RuntimePath }}"
 {{ $.Comment }}runtime_type = "{{ $runtime_handler.RuntimeType }}"
 {{ $.Comment }}runtime_root = "{{ $runtime_handler.RuntimeRoot }}"
+{{ $.Comment }}inherit_default_runtime = {{ $runtime_handler.InheritDefaultRuntime }}
 {{ $.Comment }}runtime_config_path = "{{ $runtime_handler.RuntimeConfigPath }}"
 {{ $.Comment }}container_min_memory = "{{ $runtime_handler.ContainerMinMemory }}"
 {{ $.Comment }}monitor_path = "{{ $runtime_handler.MonitorPath }}"
@@ -1399,10 +1387,7 @@ const templateStringCrioRuntimeTimezone = `# timezone To set the timezone for a 
 const templateStringCrioImage = `# The crio.image table contains settings pertaining to the management of OCI images.
 #
 # CRI-O reads its configured registries defaults from the system wide
-# containers-registries.conf(5) located in /etc/containers/registries.conf. If
-# you want to modify just CRI-O, you can change the registries configuration in
-# this file. Otherwise, leave insecure_registries and registries commented out to
-# use the system's defaults from /etc/containers/registries.conf.
+# containers-registries.conf(5) located in /etc/containers/registries.conf.
 [crio.image]
 
 `
@@ -1490,6 +1475,13 @@ const templateStringCrioImageBigFilesTemporaryDir = `# Temporary directory to us
 const templateStringCrioImageAutoReloadRegistries = `# If true, CRI-O will automatically reload the mirror registry when
 # there is an update to the 'registries.conf.d' directory. Default value is set to 'false'.
 {{ $.Comment }}auto_reload_registries = {{ .AutoReloadRegistries }}
+
+`
+
+const templateStringCrioImagePullProgressTimeout = `# The timeout for an image pull to make progress until the pull operation
+# gets canceled. This value will be also used for calculating the pull progress interval to pull_progress_timeout / 10.
+# Can be set to 0 to disable the timeout as well as the progress output.
+{{ $.Comment }}pull_progress_timeout = "{{ .PullProgressTimeout }}"
 
 `
 

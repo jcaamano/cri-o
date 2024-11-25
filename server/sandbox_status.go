@@ -1,17 +1,18 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/cri-o/cri-o/internal/log"
-	"github.com/cri-o/cri-o/internal/oci"
 	json "github.com/json-iterator/go"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
-	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/log"
+	"github.com/cri-o/cri-o/internal/oci"
 )
 
 // PodSandboxStatus returns the Status of the PodSandbox.
@@ -40,7 +41,7 @@ func (s *Server) PodSandboxStatus(ctx context.Context, req *types.PodSandboxStat
 	var containerStatuses []*types.ContainerStatus
 	var timestamp int64
 	if s.config.EnablePodEvents {
-		timestamp = time.Now().Unix()
+		timestamp = time.Now().UnixNano()
 		containerStatuses, err = s.getContainerStatusesFromSandboxID(ctx, req.PodSandboxId)
 		if err != nil {
 			return nil, status.Errorf(codes.Unknown, "could not get container statuses of the sandbox Id %q: %v", req.PodSandboxId, err)
@@ -51,7 +52,7 @@ func (s *Server) PodSandboxStatus(ctx context.Context, req *types.PodSandboxStat
 	resp := &types.PodSandboxStatusResponse{
 		Status: &types.PodSandboxStatus{
 			Id:          sandboxID,
-			CreatedAt:   sb.CreatedAt(),
+			CreatedAt:   sb.CreatedAt().UnixNano(),
 			Network:     &types.PodSandboxNetworkStatus{},
 			State:       rStatus,
 			Labels:      sb.Labels(),
@@ -89,7 +90,7 @@ func toPodIPs(ips []string) (result []*types.PodIP) {
 }
 
 func createSandboxInfo(c *oci.Container) (map[string]string, error) {
-	var info interface{}
+	var info any
 	if c.Spoofed() {
 		info = struct {
 			RuntimeSpec spec.Spec `json:"runtimeSpec,omitempty"`

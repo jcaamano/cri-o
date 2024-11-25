@@ -5,15 +5,18 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
-	libconfig "github.com/cri-o/cri-o/pkg/config"
-	"github.com/cri-o/cri-o/server/otel-collector/collectors"
 	"github.com/docker/go-units"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+
+	"github.com/cri-o/cri-o/internal/log"
+	libconfig "github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/server/metrics/collectors"
 )
 
-// DefaultCommands are the flags commands can be added to every binary
+// DefaultCommands are the flags commands can be added to every binary.
 var DefaultCommands = []*cli.Command{
 	completion(),
 	man(),
@@ -43,16 +46,20 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 	// Don't parse the config if the user explicitly set it to "".
 	path := ctx.String("config")
 	if path != "" {
-		if err := config.UpdateFromFile(path); err != nil {
-			if ctx.IsSet("config") || !os.IsNotExist(err) {
-				return err
+		if err := config.UpdateFromFile(ctx.Context, path); err != nil {
+			isNotExistErr := errors.Is(err, os.ErrNotExist)
+			if isNotExistErr {
+				log.Infof(ctx.Context, "Skipping not-existing config file %q", path)
+			}
+			if ctx.IsSet("config") || !isNotExistErr {
+				return fmt.Errorf("update config from file: %w", err)
 			}
 		}
 	}
 
 	// Parse the drop-in configuration files for config override
-	if err := config.UpdateFromPath(ctx.String("config-dir")); err != nil {
-		return err
+	if err := config.UpdateFromPath(ctx.Context, ctx.String("config-dir")); err != nil {
+		return fmt.Errorf("update config from path: %w", err)
 	}
 	// If "config-dir" is specified, config.UpdateFromPath() will set config.singleConfigPath as
 	// the last config file in "config-dir".
@@ -97,9 +104,6 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 	}
 	if ctx.IsSet("insecure-registry") {
 		config.InsecureRegistries = StringSliceTrySplit(ctx, "insecure-registry")
-	}
-	if ctx.IsSet("registry") {
-		config.Registries = StringSliceTrySplit(ctx, "registry")
 	}
 	if ctx.IsSet("default-transport") {
 		config.DefaultTransport = ctx.String("default-transport")
@@ -404,6 +408,9 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 	if ctx.IsSet("auto-reload-registries") {
 		config.AutoReloadRegistries = ctx.Bool("auto-reload-registries")
 	}
+	if ctx.IsSet("pull-progress-timeout") {
+		config.PullProgressTimeout = ctx.Duration("pull-progress-timeout")
+	}
 	if ctx.IsSet("separate-pull-cgroup") {
 		config.SeparatePullCgroup = ctx.String("separate-pull-cgroup")
 	}
@@ -440,7 +447,7 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 	return nil
 }
 
-func GetFlagsAndMetadata() ([]cli.Flag, map[string]interface{}, error) {
+func GetFlagsAndMetadata() ([]cli.Flag, map[string]any, error) {
 	config, err := libconfig.DefaultConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("error loading server config: %w", err)
@@ -449,7 +456,7 @@ func GetFlagsAndMetadata() ([]cli.Flag, map[string]interface{}, error) {
 	// TODO FIXME should be crio wipe flags
 	flags := getCrioFlags(config)
 
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"config": config,
 	}
 	return flags, metadata, nil
@@ -635,12 +642,6 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
        '--insecure-registry'.`,
 			EnvVars: []string{"CONTAINER_INSECURE_REGISTRY"},
 		},
-		&cli.StringSliceFlag{
-			Name:    "registry",
-			Value:   cli.NewStringSlice(defConf.Registries...),
-			Usage:   "Registry to be prepended when pulling unqualified images. Can be specified multiple times.",
-			EnvVars: []string{"CONTAINER_REGISTRY"},
-		},
 		&cli.StringFlag{
 			Name:    "default-transport",
 			Usage:   "A prefix to prepend to image names that cannot be pulled as-is.",
@@ -811,7 +812,7 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
 		},
 		&cli.BoolFlag{
 			Name:    "profile",
-			Usage:   "Enable pprof remote profiler on localhost:6060.",
+			Usage:   "Enable pprof remote profiler on 127.0.0.1:6060.",
 			EnvVars: []string{"CONTAINER_PROFILE"},
 		},
 		&cli.StringFlag{
@@ -936,6 +937,12 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
 			Usage:   "If true, CRI-O will automatically reload the mirror registry when there is an update to the 'registries.conf.d' directory. Default value is set to 'false'.",
 			EnvVars: []string{"AUTO_RELOAD_REGISTRIES"},
 			Value:   defConf.AutoReloadRegistries,
+		},
+		&cli.DurationFlag{
+			Name:    "pull-progress-timeout",
+			Usage:   "The timeout for an image pull to make progress until the pull operation gets canceled. This value will be also used for calculating the pull progress interval to --pull-progress-timeout / 10. Can be set to 0 to disable the timeout as well as the progress output.",
+			EnvVars: []string{"CONTAINER_PULL_PROGRESS_TIMEOUT"},
+			Value:   defConf.PullProgressTimeout,
 		},
 		&cli.BoolFlag{
 			Name:    "read-only",
@@ -1071,19 +1078,19 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name:      "stream-tls-ca",
-			Usage:     "Path to the x509 CA(s) file used to verify and authenticate client communication with the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.",
+			Usage:     "Path to the x509 CA(s) file used to verify and authenticate client communication with the encrypted stream. This file can change and CRI-O will automatically pick up the changes.",
 			EnvVars:   []string{"CONTAINER_TLS_CA"},
 			TakesFile: true,
 		},
 		&cli.StringFlag{
 			Name:      "stream-tls-cert",
-			Usage:     "Path to the x509 certificate file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.",
+			Usage:     "Path to the x509 certificate file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes.",
 			EnvVars:   []string{"CONTAINER_TLS_CERT"},
 			TakesFile: true,
 		},
 		&cli.StringFlag{
 			Name:      "stream-tls-key",
-			Usage:     "Path to the key file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.",
+			Usage:     "Path to the key file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes.",
 			EnvVars:   []string{"CONTAINER_TLS_KEY"},
 			TakesFile: true,
 		},
@@ -1258,4 +1265,9 @@ func StringSliceTrySplit(ctx *cli.Context, name string) []string {
 	}
 
 	return trimmedValues
+}
+
+// Timestamp returns a string timestamp representation.
+func Timestamp() string {
+	return strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", "")
 }

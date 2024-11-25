@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,15 +9,18 @@ import (
 	"strings"
 
 	"github.com/containers/image/v5/pkg/sysregistriesv2"
-	"github.com/cri-o/cri-o/internal/log"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/sirupsen/logrus"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
+
+	"github.com/cri-o/cri-o/internal/log"
 )
 
 // Reload reloads the configuration for the single crio.conf and the drop-in
 // configuration directory.
-func (c *Config) Reload() error {
-	logrus.Infof("Reloading configuration")
+func (c *Config) Reload(ctx context.Context) error {
+	log.Infof(ctx, "Reloading configuration")
 
 	// Reload the config
 	newConfig, err := DefaultConfig()
@@ -25,21 +29,19 @@ func (c *Config) Reload() error {
 	}
 
 	if _, err := os.Stat(c.singleConfigPath); !os.IsNotExist(err) {
-		logrus.Infof("Updating config from file %s", c.singleConfigPath)
-		if err := newConfig.UpdateFromFile(c.singleConfigPath); err != nil {
-			return err
+		if err := newConfig.UpdateFromFile(ctx, c.singleConfigPath); err != nil {
+			return fmt.Errorf("update config from single file: %w", err)
 		}
 	} else {
-		logrus.Infof("Skipping not-existing config file %q", c.singleConfigPath)
+		log.Infof(ctx, "Skipping not-existing config file %q", c.singleConfigPath)
 	}
 
 	if _, err := os.Stat(c.dropInConfigDir); !os.IsNotExist(err) {
-		logrus.Infof("Updating config from path %s", c.dropInConfigDir)
-		if err := newConfig.UpdateFromPath(c.dropInConfigDir); err != nil {
-			return err
+		if err := newConfig.UpdateFromPath(ctx, c.dropInConfigDir); err != nil {
+			return fmt.Errorf("update config from path: %w", err)
 		}
 	} else {
-		logrus.Infof("Skipping not-existing config path %q", c.dropInConfigDir)
+		log.Infof(ctx, "Skipping not-existing config path %q", c.dropInConfigDir)
 	}
 
 	// Reload all available options
@@ -81,7 +83,7 @@ func (c *Config) Reload() error {
 
 // logConfig logs a config set operation as with info verbosity. Please always
 // use this function for setting configuration options to ensure consistent
-// log outputs
+// log outputs.
 func logConfig(option, value string) {
 	logrus.Infof("Set config %s to %q", option, value)
 }
@@ -145,24 +147,34 @@ func (c *Config) ReloadPauseImage(newConfig *Config) error {
 	return nil
 }
 
-// ReloadPinnedImages updates the PinnedImages with the provided `newConfig`.
-// The method print log in case of any updates.
+// ReloadPinnedImages replace the PinnedImages
+// with the provided `newConfig.PinnedImages`.
+// The method skips empty items and prints a log message.
 func (c *Config) ReloadPinnedImages(newConfig *Config) {
-	updatedPinnedImages := make([]string, len(newConfig.PinnedImages))
-	updatedPinnedImageList := false
+	if len(newConfig.PinnedImages) == 0 {
+		c.PinnedImages = []string{}
+		logConfig("pinned_images", "[]")
+		return
+	}
 
-	for i, image := range newConfig.PinnedImages {
-		if i < len(c.PinnedImages) && image == c.PinnedImages[i] {
-			continue
+	if cmp.Equal(c.PinnedImages, newConfig.PinnedImages,
+		cmpopts.SortSlices(func(a, b string) bool {
+			return a < b
+		}),
+	) {
+		return
+	}
+
+	pinnedImages := []string{}
+	for _, img := range newConfig.PinnedImages {
+		if img != "" {
+			pinnedImages = append(pinnedImages, img)
 		}
-		updatedPinnedImages[i] = image
-		updatedPinnedImageList = true
 	}
 
-	if updatedPinnedImageList {
-		logConfig("pinned_images", strings.Join(updatedPinnedImages, ", "))
-		c.PinnedImages = updatedPinnedImages
-	}
+	logConfig("pinned_images", strings.Join(pinnedImages, ","))
+
+	c.PinnedImages = pinnedImages
 }
 
 // ReloadRegistries reloads the registry configuration from the Configs
@@ -223,7 +235,7 @@ func (c *Config) ReloadAppArmorProfile(newConfig *Config) error {
 	return nil
 }
 
-// ReloadBlockIOConfig reloads the blockio configuration from the new config
+// ReloadBlockIOConfig reloads the blockio configuration from the new config.
 func (c *Config) ReloadBlockIOConfig(newConfig *Config) error {
 	if c.BlockIOConfigFile != newConfig.BlockIOConfigFile {
 		if err := c.BlockIO().Load(newConfig.BlockIOConfigFile); err != nil {
@@ -239,7 +251,7 @@ func (c *Config) ReloadBlockIOConfig(newConfig *Config) error {
 	return nil
 }
 
-// ReloadRdtConfig reloads the RDT configuration if changed
+// ReloadRdtConfig reloads the RDT configuration if changed.
 func (c *Config) ReloadRdtConfig(newConfig *Config) error {
 	if c.RdtConfigFile != newConfig.RdtConfigFile {
 		if err := c.Rdt().Load(newConfig.RdtConfigFile); err != nil {
@@ -251,7 +263,7 @@ func (c *Config) ReloadRdtConfig(newConfig *Config) error {
 	return nil
 }
 
-// ReloadRuntimes reloads the runtimes configuration if changed
+// ReloadRuntimes reloads the runtimes configuration if changed.
 func (c *Config) ReloadRuntimes(newConfig *Config) error {
 	var updated bool
 	if !RuntimesEqual(c.Runtimes, newConfig.Runtimes) {

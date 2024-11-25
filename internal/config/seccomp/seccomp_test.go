@@ -4,14 +4,15 @@ import (
 	"context"
 	"os"
 
-	"github.com/cri-o/cri-o/internal/config/seccomp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runtime-tools/generate"
 	types "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/cri-o/cri-o/internal/config/seccomp"
 )
 
-// The actual test suite
+// The actual test suite.
 var _ = t.Describe("Config", func() {
 	var sut *seccomp.Config
 
@@ -90,6 +91,12 @@ var _ = t.Describe("Config", func() {
 	})
 
 	t.Describe("Setup", func() {
+		BeforeEach(func() {
+			if sut.IsDisabled() {
+				Skip("tests need to run as root and enabled seccomp")
+			}
+		})
+
 		It("should succeed with custom profile from field", func() {
 			// Given
 			generator, err := generate.New("linux")

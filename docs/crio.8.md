@@ -103,9 +103,9 @@ crio
 [--profile-mem]=[value]
 [--profile-port]=[value]
 [--profile]
+[--pull-progress-timeout]=[value]
 [--rdt-config-file]=[value]
 [--read-only]
-[--registry]=[value]
 [--root|-r]=[value]
 [--runroot]=[value]
 [--runtimes]=[value]
@@ -164,7 +164,7 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 **--additional-devices**="": Devices to add to the containers.
 
-**--allowed-devices**="": Devices a user is allowed to specify with the "io.kubernetes.cri-o.Devices" allowed annotation. (default: "/dev/fuse")
+**--allowed-devices**="": Devices a user is allowed to specify with the "io.kubernetes.cri-o.Devices" allowed annotation. (default: "/dev/fuse", "/dev/net/tun")
 
 **--apparmor-profile**="": Name of the apparmor profile to be used as the runtime's default. This only takes effect if the user does not specify a profile via the Kubernetes Pod's metadata annotation. (default: "crio-default")
 
@@ -225,7 +225,7 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 **--default-mounts-file**="": Path to default mounts file.
 
-**--default-runtime**="": Default OCI runtime from the runtimes config. (default: "runc")
+**--default-runtime**="": Default OCI runtime from the runtimes config. (default: "crun")
 
 **--default-sysctls**="": Sysctls to add to the containers.
 
@@ -365,7 +365,7 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 **--pause-command**="": Path to the pause executable in the pause image. (default: "/pause")
 
-**--pause-image**="": Image which contains the pause executable. (default: "registry.k8s.io/pause:3.9")
+**--pause-image**="": Image which contains the pause executable. (default: "registry.k8s.io/pause:3.10")
 
 **--pause-image-auth-file**="": Path to a config file containing credentials for --pause-image.
 
@@ -375,7 +375,7 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 **--pinns-path**="": The path to find the pinns binary, which is needed to manage namespace lifecycle. Will be searched for in $PATH if empty.
 
-**--profile**: Enable pprof remote profiler on localhost:6060.
+**--profile**: Enable pprof remote profiler on 127.0.0.1:6060.
 
 **--profile-cpu**="": Write a pprof CPU profile to the provided path.
 
@@ -383,11 +383,11 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 **--profile-port**="": Port for the pprof profiler. (default: 6060)
 
+**--pull-progress-timeout**="": The timeout for an image pull to make progress until the pull operation gets canceled. This value will be also used for calculating the pull progress interval to --pull-progress-timeout / 10. Can be set to 0 to disable the timeout as well as the progress output. (default: 10s)
+
 **--rdt-config-file**="": Path to the RDT configuration file for configuring the resctrl pseudo-filesystem.
 
 **--read-only**: Setup all unprivileged containers to run as read-only. Automatically mounts the containers' tmpfs on '/run', '/tmp' and '/var/tmp'.
-
-**--registry**="": Registry to be prepended when pulling unqualified images. Can be specified multiple times.
 
 **--root, -r**="": The CRI-O root directory. (default: "/var/lib/containers/storage")
 
@@ -421,15 +421,15 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 **--stream-port**="": Bind port for streaming socket. If the port is set to '0', then CRI-O will allocate a random free port number. (default: "0")
 
-**--stream-tls-ca**="": Path to the x509 CA(s) file used to verify and authenticate client communication with the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.
+**--stream-tls-ca**="": Path to the x509 CA(s) file used to verify and authenticate client communication with the encrypted stream. This file can change and CRI-O will automatically pick up the changes.
 
-**--stream-tls-cert**="": Path to the x509 certificate file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.
+**--stream-tls-cert**="": Path to the x509 certificate file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes.
 
-**--stream-tls-key**="": Path to the key file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes within 5 minutes.
+**--stream-tls-key**="": Path to the key file used to serve the encrypted stream. This file can change and CRI-O will automatically pick up the changes.
 
 **--timezone, --tz**="": To set the timezone for a container in CRI-O. If an empty string is provided, CRI-O retains its default behavior. Use 'Local' to match the timezone of the host machine.
 
-**--tracing-endpoint**="": Address on which the gRPC tracing collector will listen. (default: "0.0.0.0:4317")
+**--tracing-endpoint**="": Address on which the gRPC tracing collector will listen. (default: "127.0.0.1:4317")
 
 **--tracing-sampling-rate-per-million**="": Number of samples to collect per million OpenTelemetry spans. Set to 1000000 to always sample. (default: 0)
 
@@ -444,9 +444,49 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 # COMMANDS
 
+## check
+
+Check CRI-O storage directory for errors.
+
+This command can also repair damaged containers, images and layers.
+
+By default, the data integrity of the storage directory is verified,
+which can be an I/O and CPU-intensive operation. The --quick option
+can be used to reduce the number of checks run.
+
+When using the --repair option, especially with the --force option,
+CRI-O and any currently running containers should be stopped if
+possible to ensure no concurrent access to the storage directory
+occurs.
+
+The --wipe option can be used to automatically attempt to remove
+containers and images on a repair failure. This option, combined
+with the --force option, can be used to entirely remove the storage
+directory content in case of irrecoverable errors. This should be
+used as a last resort, and similarly to the --repair option, it's
+best if CRI-O and any currently running containers are stopped.
+
+**--age, -a**="": Maximum allowed age for unreferenced layers (default: "24h")
+
+**--force, -f**: Remove damaged containers
+
+**--quick, -q**: Perform only quick checks
+
+**--repair, -r**: Remove damaged images and layers
+
+**--wipe, -w**: Wipe storage directory on repair failure
+
 ## complete, completion
 
 Generate bash, fish or zsh completions.
+
+## config
+
+Outputs a commented version of the configuration file that could be used
+by CRI-O. This allows you to save you current configuration setup and then load
+it later with **--config**. Global options will modify the output.
+
+**--default**: Output the default configuration (without taking into account any configuration options).
 
 ## man
 
@@ -461,44 +501,6 @@ Generate the markdown documentation.
 ### help, h
 
 Shows a list of commands or help for one command
-
-## config
-
-Outputs a commented version of the configuration file that could be used
-by CRI-O. This allows you to save you current configuration setup and then load
-it later with **--config**. Global options will modify the output.
-
-**--default**: Output the default configuration (without taking into account any configuration options).
-
-**--migrate-defaults, -m**="": Migrate the default config from a specified version.
-
-    The migrate-defaults command has been deprecated and will be removed in the future.
-
-    To run a config migration, just select the input config via the global
-    '--config,-c' command line argument, for example:
-    ```
-    crio -c /etc/crio/crio.conf.d/00-default.conf config -m 1.17
-    ```
-    The migration will print converted configuration options to stderr and will
-    output the resulting configuration to stdout.
-    Please note that the migration will overwrite any fields that have changed
-    defaults between versions. To save a custom configuration change, it should
-    be in a drop-in configuration file instead.
-    Possible values: "1.17" (default: "1.17")
-
-## version
-
-display detailed version information
-
-**--json, -j**: print JSON instead of text
-
-**--verbose, -v**: print verbose information (for example all golang dependencies)
-
-## wipe
-
-wipe CRI-O's container and image storage
-
-**--force, -f**: force wipe by skipping the version check
 
 ## status
 
@@ -519,6 +521,30 @@ Display detailed information about the provided container ID.
 ### info, i
 
 Retrieve generic information about CRI-O, such as the cgroup and storage driver.
+
+### goroutines, g
+
+Display the goroutine stack.
+
+### heap, hp
+
+Write the heap dump to a temp file and print its location on disk.
+
+**--file, -f**="": Output file of the heap dump.
+
+## version
+
+display detailed version information
+
+**--json, -j**: print JSON instead of text
+
+**--verbose, -v**: print verbose information (for example all golang dependencies)
+
+## wipe
+
+wipe CRI-O's container and image storage
+
+**--force, -f**: force wipe by skipping the version check
 
 ## help, h
 
